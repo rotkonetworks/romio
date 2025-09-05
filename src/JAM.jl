@@ -1,25 +1,39 @@
-# src/JAM.jl
 module JAM
 
-# Core includes
+using Blake2
+using BinaryFields
+using BinaryReedSolomon
+using BatchedMerkleTree
+using StaticArrays
+using DataStructures
+
+# constants
 include("constants.jl")
-include("types/types.jl")
-include("crypto/crypto.jl")
-include("codec/codec.jl")
-include("merkle/merkle.jl")
-include("erasure/erasure.jl")
-include("pvm/pvm.jl")
+
+# types in dependency order
+include("types/basic.jl")
+include("crypto/hash.jl")
+include("types/validator.jl")
+include("types/service.jl")
+include("types/work.jl")
+
+# crypto
+include("crypto/erasure.jl")
+
+# state
 include("state/state.jl")
+
+# blocks
+include("blocks/header.jl")
+include("blocks/extrinsic.jl")
 include("blocks/blocks.jl")
-include("consensus/safrole.jl")
-include("consensus/grandpa.jl")
-include("accumulation/accumulation.jl")
-include("guarantees/guarantees.jl")
-include("audit/audit.jl")
 
-# Main exports
+# state transition
+include("state/transition.jl")
+
+# exports
 export State, Block, Header
-export state_transition, validate_block
 export ServiceAccount, WorkPackage, WorkReport
+export H, H0, Hash, JAMErasure
 
-end # module
+end # module JAM
