@@ -1,0 +1,3 @@
+[submodule "deps/Julia-Blake2"]
+	path = deps/Julia-Blake2
+	url = https://github.com/ParkerDiamond/Julia-Blake2

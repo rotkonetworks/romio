@@ -5,6 +5,7 @@ authors = ["jamit@rotko.net"]
 version = "0.1.0"
 
 [deps]
+Blake2 = "c1114f41-f8ba-4217-acb8-b62fd65167a1"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Keccak = "46f8cb0c-4e3a-418e-8a08-140a605d534d"
 BinaryFields = "0fee9d7f-8397-4f0d-9ec6-117db1666467"
@@ -13,6 +14,9 @@ BatchedMerkleTree = "225b011c-e439-4471-b39b-04a9a0fe32f0"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 BitIntegers = "c3b6d118-76ef-56ca-8cc7-ebb389d030a1"
+
+[sources]
+Blake2 = {path = "deps/Julia-Blake2"}
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
