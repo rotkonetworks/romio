@@ -1,5 +1,5 @@
 # src/types/service.jl
-# Service account types
+# service account types
 
 struct ServiceAccount
     storage::Dict{Blob, Blob}
@@ -14,13 +14,13 @@ struct ServiceAccount
     last_accumulation::TimeSlot
     parent_service::ServiceId
     
-    # Computed fields (cached)
+    # computed fields (cached)
     item_count::UInt32
     octet_count::UInt64
     threshold_balance::Balance
 end
 
-# Create new service account
+# create new service account
 function new_service(
     code_hash::Hash,
     balance::Balance,
@@ -45,7 +45,7 @@ function new_service(
     )
 end
 
-# Calculate threshold balance
+# calculate threshold balance
 function compute_threshold(acc::ServiceAccount)::Balance
     items = 2 * length(acc.preimage_meta) + length(acc.storage)
     octets = sum(81 + z for (h, z) in keys(acc.preimage_meta); init=0)
