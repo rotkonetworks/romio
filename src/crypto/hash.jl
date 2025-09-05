@@ -1,17 +1,21 @@
-using Blake2
+# src/crypto/hash.jl
+using SHA
+using Keccak
 
-# JAM uses Blake2b-256
+# blake2b 256-bit hash (primary hash in JAM)
 function H(data::Vector{UInt8})::Hash
-    out = zeros(UInt8, 32)
-    Blake2.Blake2b!(out, 32, UInt8[], 0, data, length(data))
-    return Hash(out)
+    result = SHA.blake2b_256(data)
+    return Hash(result)
 end
 
-# Hash multiple items
-function H(items...)::Hash
-    combined = UInt8[]
-    for item in items
-        append!(combined, item)
-    end
-    return H(combined)
+# keccak-256 (Ethereum-compatible, used for compatibility)
+function HK(data::Vector{UInt8})::Hash
+    sponge = Keccak.KeccakSponge{17, UInt64}(Keccak.KeccakPad(0x01))
+    sponge = Keccak.absorb(sponge, data)
+    sponge = Keccak.pad(sponge)
+    result = Keccak.squeeze(sponge, Val(32))[2]
+    return Hash(collect(result))
 end
+
+# for merkle roots if needed
+H0 = Hash(zeros(UInt8, 32))
