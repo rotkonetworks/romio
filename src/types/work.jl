@@ -1,5 +1,5 @@
 # src/types/work.jl
-# Work-related types
+# work-related types
 
 struct WorkItem
     service::ServiceId
