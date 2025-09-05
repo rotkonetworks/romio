@@ -1,5 +1,5 @@
 # src/blocks/extrinsic.jl
-# Extrinsic data structures
+# extrinsic data structures
 
 struct TicketExtrinsic
     entries::Vector{Tuple{UInt32, BandersnatchProof}}
@@ -48,4 +48,21 @@ struct Extrinsic
     guarantees::GuaranteeExtrinsic
     assurances::AssuranceExtrinsic
     disputes::DisputeExtrinsic
+end
+
+struct BandersnatchProof
+    data::BandersnatchSig
+end
+
+struct Culprit
+    target::Hash
+    key::Ed25519Key
+    signature::Ed25519Sig
+end
+
+struct Fault
+    target::Hash
+    vote::Bool
+    key::Ed25519Key
+    signature::Ed25519Sig
 end
