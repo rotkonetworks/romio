@@ -19,6 +19,8 @@ include("types/work.jl")
 
 # crypto
 include("crypto/erasure.jl")
+include("crypto/mmr.jl")
+include("crypto/bls.jl")
 
 # state
 include("state/state.jl")
