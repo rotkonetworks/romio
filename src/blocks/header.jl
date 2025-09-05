@@ -1,5 +1,5 @@
 # src/blocks/header.jl
-# Block header structure
+# block header structure
 
 struct Header
     parent_hash::Hash
@@ -21,7 +21,7 @@ struct EpochMarker
 end
 
 function validate_header(header::Header, parent::Header, state::State)::Bool
-    # Check timeslot
+    # check timeslot
     if header.timeslot <= parent.timeslot
         return false
     end
@@ -30,12 +30,12 @@ function validate_header(header::Header, parent::Header, state::State)::Bool
         return false
     end
     
-    # Check parent hash
+    # check parent hash
     if header.parent_hash != hash_header(parent)
         return false
     end
     
-    # Validate seal signature
+    # validate seal signature
     seal_key = state.safrole.seal_keys[header.timeslot % E]
     if !verify_seal(header, seal_key)
         return false
