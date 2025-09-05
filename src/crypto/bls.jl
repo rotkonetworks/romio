@@ -2,6 +2,7 @@
 # bls signatures for jam validators using blst library
 
 module BLS
+import .BLS: BlsPublicKey, BlsSignature
 
 using StaticArrays
 

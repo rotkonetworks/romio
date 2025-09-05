@@ -17,8 +17,8 @@ const BandersnatchKey = SVector{32, UInt8}
 const BandersnatchSig = SVector{96, UInt8}
 const BandersnatchRingRoot = SVector{144, UInt8}
 const BandersnatchRingProof = SVector{784, UInt8}
-const BlsKey = BLS.BlsPublicKey     # 48 bytes SVector{144, UInt8}
-const BlsSig = BLS.BlsSignature     # 96 bytes SVector{96, UInt8}
+const BlsKey = SVector{144, UInt8}
+const BlsSig = SVector{96, UInt8}
 
 # dynamic arrays
 const Blob = Vector{UInt8}
