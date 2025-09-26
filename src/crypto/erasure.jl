@@ -1,14 +1,18 @@
+# Erasure coding for JAM
+module Erasure
+
 using BinaryReedSolomon
 using BinaryFields
+import BinaryReedSolomon: ReedSolomonEncoding, reed_solomon, encode
 
-# jAM uses RS(342, 1023) in GF(2^16)
+# JAM uses RS(512, 1023) in GF(2^16)
 struct JAMErasure
     rs::ReedSolomonEncoding{BinaryElem16}
 end
 
 function JAMErasure()
     # create encoder for JAM's parameters
-    rs = reed_solomon(BinaryElem16, DS, TS)
+    rs = reed_solomon(BinaryElem16, 512, 1024)
     return JAMErasure(rs)
 end
 
@@ -18,7 +22,7 @@ function encode_erasure(enc::JAMErasure, data::Vector{UInt8})
     chunk_size = 2
     num_chunks = div(length(data), chunk_size)
     
-    @assert num_chunks == DS "Data must be exactly $(DS * 2) bytes"
+    @assert num_chunks == 512 "Data must be exactly $(512 * 2) bytes"
     
     # convert to field elements
     message = BinaryElem16[]
@@ -40,4 +44,8 @@ function encode_erasure(enc::JAMErasure, data::Vector{UInt8})
     end
     
     return result
+end
+
+export JAMErasure, encode_erasure
+
 end
