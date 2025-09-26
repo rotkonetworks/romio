@@ -1,6 +1,10 @@
 # src/blocks/extrinsic.jl
 # extrinsic data structures
 
+struct BandersnatchProof
+    data::BandersnatchSig
+end
+
 struct TicketExtrinsic
     entries::Vector{Tuple{UInt32, BandersnatchProof}}
 end
@@ -9,18 +13,14 @@ struct PreimageExtrinsic
     preimages::Vector{Tuple{ServiceId, Blob}}
 end
 
-struct GuaranteeExtrinsic
-    guarantees::Vector{Guarantee}
-end
-
 struct Guarantee
     report::WorkReport
     timeslot::TimeSlot
     credentials::Vector{Tuple{ValidatorId, Ed25519Sig}}
 end
 
-struct AssuranceExtrinsic
-    assurances::Vector{Assurance}
+struct GuaranteeExtrinsic
+    guarantees::Vector{Guarantee}
 end
 
 struct Assurance
@@ -30,28 +30,14 @@ struct Assurance
     signature::Ed25519Sig
 end
 
-struct DisputeExtrinsic
-    verdicts::Vector{Verdict}
-    culprits::Vector{Culprit}
-    faults::Vector{Fault}
+struct AssuranceExtrinsic
+    assurances::Vector{Assurance}
 end
 
 struct Verdict
     report_hash::Hash
     epoch::UInt32
     judgments::Vector{Tuple{Bool, ValidatorId, Ed25519Sig}}
-end
-
-struct Extrinsic
-    tickets::TicketExtrinsic
-    preimages::PreimageExtrinsic
-    guarantees::GuaranteeExtrinsic
-    assurances::AssuranceExtrinsic
-    disputes::DisputeExtrinsic
-end
-
-struct BandersnatchProof
-    data::BandersnatchSig
 end
 
 struct Culprit
@@ -65,4 +51,18 @@ struct Fault
     vote::Bool
     key::Ed25519Key
     signature::Ed25519Sig
+end
+
+struct DisputeExtrinsic
+    verdicts::Vector{Verdict}
+    culprits::Vector{Culprit}
+    faults::Vector{Fault}
+end
+
+struct Extrinsic
+    tickets::TicketExtrinsic
+    preimages::PreimageExtrinsic
+    guarantees::GuaranteeExtrinsic
+    assurances::AssuranceExtrinsic
+    disputes::DisputeExtrinsic
 end
