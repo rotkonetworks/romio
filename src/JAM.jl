@@ -24,6 +24,8 @@ include("codec/decoder.jl")
 include("crypto/bls.jl")
 include("crypto/hash.jl")
 include("crypto/erasure.jl")
+using .Erasure: JAMErasure, encode_erasure
+using .Erasure: JAMErasure, encode_erasure
 include("crypto/mmr.jl")
 
 # remaining types
