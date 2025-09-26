@@ -1,4 +1,3 @@
-# src/codec/decoder.jl
 # Decoding functions for JAM serialization
 
 module Decoder
@@ -16,22 +15,23 @@ function decode_natural(data::Vector{UInt8}, offset::Int=1)
     first = data[offset]
     if first == 0x00
         return (0, offset + 1)
-    elseif first < 128
+    elseif first < 0x80
         return (Int(first), offset + 1)
+    elseif first < 0xc0
+        # 2-byte encoding
+        val = ((Int(first) & 0x3f) << 8) | Int(data[offset + 1])
+        return (val, offset + 2)
+    elseif first < 0xe0
+        # 3-byte encoding
+        val = ((Int(first) & 0x1f) << 16) | (Int(data[offset + 1]) << 8) | Int(data[offset + 2])
+        return (val, offset + 3)
     elseif first == 0xff
         # 8-byte encoding
         value = decode_fixed_u64(data, offset + 1)
         return (value, offset + 9)
     else
-        # variable length
-        l = trailing_ones(first) + 1
-        prefix_val = first & ((1 << (8-l)) - 1)
-        
-        value = prefix_val
-        for i in 1:l
-            value = (value << 8) | data[offset + i]
-        end
-        return (value, offset + l + 1)
+        # other multi-byte encodings
+        error("Unsupported encoding prefix: $(first)")
     end
 end
 

@@ -29,16 +29,13 @@ function encode(x::Integer)
     elseif x < 128
         return [UInt8(x)]
     elseif x < 16384
-        # 2-byte encoding
-        return [0x80 | (x & 0x3f), UInt8(x >> 6)]
-    elseif x < 2^21
+        # 2-byte encoding: [0x80 + high bits, low byte]
+        return [UInt8(0x80 | (x >> 8)), UInt8(x & 0xff)]
+    elseif x < 2097152  # 2^21
         # 3-byte encoding
-        return [0xc0 | (x & 0x1f), UInt8(x >> 5), UInt8(x >> 13)]
-    elseif x < 2^28
-        # 4-byte encoding  
-        return [0xe0 | (x & 0x0f), UInt8(x >> 4), UInt8(x >> 12), UInt8(x >> 20)]
+        return [UInt8(0xc0 | (x >> 16)), UInt8((x >> 8) & 0xff), UInt8(x & 0xff)]
     else
-        # full 64-bit with 0xff prefix
+        # full encoding with 0xff prefix
         return [0xff, encode_fixed(x, 8)...]
     end
 end
