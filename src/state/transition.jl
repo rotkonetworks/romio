@@ -232,7 +232,3 @@ function verify_seal(header::Header, key::BandersnatchKey)
     return true
 end
 
-function hash_header(header::Header)::Hash
-    # todo: implement proper header hashing
-    return H0
-end
