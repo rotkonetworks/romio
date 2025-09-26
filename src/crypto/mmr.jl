@@ -80,7 +80,7 @@ function mmr_superpeak(mmr::MerkleMountainRange)::Hash
        # recursive hashing from left to right
        result = peaks[1]
        for i in 2:length(peaks)
-           result = Hash(keccak256(vcat(b"\$peak", result, peaks[i])))
+           result = Hash(keccak256(vcat(b"peak", result, peaks[i])))
        end
        return result
    end
@@ -162,7 +162,7 @@ append accumulation output to belt
 function belt_append!(belt::MerkleMountainBelt, service::ServiceId, output::Hash)
    # create leaf hash from service and output
    leaf_data = vcat(encode_uint32(service), output)
-   leaf = Hash(keccak256(vcat(b"\$accout", leaf_data)))
+   leaf = Hash(keccak256(vcat(b"accout", leaf_data)))
    
    # append to underlying mmr
    mmr_append!(belt.mmr, leaf)
