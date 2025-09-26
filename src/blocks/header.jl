@@ -1,6 +1,12 @@
 # src/blocks/header.jl
 # block header structure
 
+struct EpochMarker
+    entropy::Hash
+    previous_entropy::Hash
+    validators::Vector{Tuple{BandersnatchKey, Ed25519Key}}
+end
+
 struct Header
     parent_hash::Hash
     state_root::Hash
@@ -12,12 +18,6 @@ struct Header
     author_index::ValidatorId
     vrf_signature::BandersnatchSig
     seal::BandersnatchSig
-end
-
-struct EpochMarker
-    entropy::Hash
-    previous_entropy::Hash
-    validators::Vector{Tuple{BandersnatchKey, Ed25519Key}}
 end
 
 function validate_header(header::Header, parent::Header, state::State)::Bool
