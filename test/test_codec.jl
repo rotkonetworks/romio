@@ -4,10 +4,10 @@ using JAM
 using StaticArrays
 
 # Include codec modules
-include("../src/codec/codec.jl")
-include("../src/codec/complex.jl")
-include("../src/codec/jam_types.jl")
-include("../src/codec/decoder.jl")
+include("../src/serialization/codec.jl")
+include("../src/serialization/complex.jl")
+include("../src/serialization/jam_types.jl")
+include("../src/serialization/decoder.jl")
 
 @testset "JAM Codec Tests" begin
     

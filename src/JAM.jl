@@ -14,10 +14,10 @@ include("constants.jl")
 include("types/basic.jl")
 
 # codec modules
-include("codec/codec.jl")
-include("codec/complex.jl")
-include("codec/jam_types.jl")
-include("codec/decoder.jl")
+include("serialization/codec.jl")
+include("serialization/complex.jl")
+include("serialization/jam_types.jl")
+include("serialization/decoder.jl")
 
 # crypto modules
 include("crypto/bls.jl")
