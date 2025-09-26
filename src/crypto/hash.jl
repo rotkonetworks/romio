@@ -3,8 +3,8 @@ using Blake2
 using Keccak
 
 # blake2b 256-bit hash (primary hash in JAM)
-function H(data::Vector{UInt8})::Hash
-  result = Blake2.blake2b(data, 32)
+function H(data::Union{Vector{UInt8}, Base.CodeUnits{UInt8, String}})::Hash
+  result = Blake2.blake2(Vector{UInt8}(data), 32)
   return Hash(result)
 end
 
