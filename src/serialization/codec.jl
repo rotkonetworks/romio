@@ -26,26 +26,21 @@ function encode(x::Integer)
         error("Cannot encode negative integers as naturals")
     elseif x == 0
         return [0x00]
+    elseif x < 128
+        return [UInt8(x)]
+    elseif x < 16384
+        # 2-byte encoding
+        return [0x80 | (x & 0x3f), UInt8(x >> 6)]
+    elseif x < 2^21
+        # 3-byte encoding
+        return [0xc0 | (x & 0x1f), UInt8(x >> 5), UInt8(x >> 13)]
+    elseif x < 2^28
+        # 4-byte encoding  
+        return [0xe0 | (x & 0x0f), UInt8(x >> 4), UInt8(x >> 12), UInt8(x >> 20)]
+    else
+        # full 64-bit with 0xff prefix
+        return [0xff, encode_fixed(x, 8)...]
     end
-    
-    # find smallest l where x < 2^(7l)
-    for l in 1:8
-        if x < 2^(7*l)
-            if l == 8 && x >= 2^56
-                # special case: use 0xff prefix for full 64-bit
-                return [0xff, encode_fixed(x, 8)...]
-            else
-                # prefix byte: 2^8 - 2^(8-l) + floor(x / 2^(8l))
-                prefix = UInt8(2^8 - 2^(8-l) + (x >> (8*l)))
-                # remainder bytes in little-endian
-                remainder = encode_fixed(x % 2^(8*l), l)
-                return [prefix, remainder...]
-            end
-        end
-    end
-    
-    # fallback for values needing full encoding
-    return [0xff, encode_fixed(x, 8)...]
 end
 
 # C.12: Fixed-length integer encoding (little-endian)
