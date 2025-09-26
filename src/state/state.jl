@@ -5,7 +5,6 @@ using StaticArrays
 using DataStructures
 
 # include merkle mountain range
-include("../crypto/mmr.jl")
 
 struct RecentBlock
    header_hash::Hash
@@ -36,23 +35,8 @@ struct PrivilegeState
    auto_accumulate::Dict{ServiceId, Gas}
 end
 
-struct ValidatorStats
-   # placeholder for validator statistics
-   blocks_produced::UInt32
-   tickets_submitted::UInt32
-end
 
-struct CoreStats
-   # placeholder for core statistics
-   reports_accumulated::UInt32
-   gas_used::Gas
-end
 
-struct ServiceStats
-   # placeholder for service statistics
-   accumulations::UInt32
-   total_gas::Gas
-end
 
 struct StatisticsState
    validator_stats::Tuple{Vector{ValidatorStats}, Vector{ValidatorStats}}
@@ -60,16 +44,7 @@ struct StatisticsState
    service_stats::Dict{ServiceId, ServiceStats}
 end
 
-struct Ticket
-   attempt::UInt32
-   identifier::BandersnatchKey
-end
 
-struct ValidatorKey
-   bandersnatch::BandersnatchKey
-   ed25519::Ed25519Key
-   bls::BlsKey
-end
 
 mutable struct State
    # core authorizations (α, φ)
