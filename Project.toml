@@ -1,5 +1,5 @@
 # Project.toml
-name = "jamit"
+name = "JAM"
 uuid = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 authors = ["jamit@rotko.net"]
 version = "0.1.0"
