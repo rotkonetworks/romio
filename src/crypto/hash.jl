@@ -18,4 +18,4 @@ function HK(data::Vector{UInt8})::Hash
 end
 
 # for merkle roots if needed
-H0 = Hash(zeros(UInt8, 32))
+const H0 = Hash(zeros(UInt8, 32))

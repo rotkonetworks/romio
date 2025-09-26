@@ -28,7 +28,3 @@ struct Ticket
 end
 
 # tagged type for imports
-struct Tagged{T}
-    value::T
-    tag::UInt8
-end

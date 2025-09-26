@@ -70,7 +70,7 @@ function update_recent_blocks!(state::State, header::Header)
     push!(state.recent_blocks, new_block)
     
     # keep only H most recent
-    if length(state.recent_blocks) > H
+    if length(state.recent_blocks) > HISTORY_DEPTH
         popfirst!(state.recent_blocks)
     end
 end

@@ -9,7 +9,7 @@ const JAM_EPOCH = 1_735_732_800  # 2025-01-01 12:00 UTC
 # network
 const C = 341        # total cores
 const V = 1023       # total validators
-const H = 8          # recent history blocks
+const HISTORY_DEPTH = 8          # recent history blocks
 const L = 14400      # max lookup anchor age (D = L + 4800 = 19200)
 const D = 19200      # preimage expiry period
 

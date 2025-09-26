@@ -1,3 +1,4 @@
+# src/JAM.jl
 module JAM
 
 using Blake2
@@ -12,15 +13,23 @@ include("constants.jl")
 
 # types in dependency order
 include("types/basic.jl")
+
+# codec modules
+include("codec/codec.jl")
+include("codec/complex.jl")
+include("codec/jam_types.jl")
+include("codec/decoder.jl")
+
+# crypto modules
+include("crypto/bls.jl")
 include("crypto/hash.jl")
+include("crypto/erasure.jl")
+include("crypto/mmr.jl")
+
+# remaining types
 include("types/validator.jl")
 include("types/service.jl")
 include("types/work.jl")
-
-# crypto
-include("crypto/erasure.jl")
-include("crypto/mmr.jl")
-include("crypto/bls.jl")
 
 # state
 include("state/state.jl")
@@ -37,5 +46,8 @@ include("state/transition.jl")
 export State, Block, Header
 export ServiceAccount, WorkPackage, WorkReport
 export H, H0, Hash, JAMErasure
+
+# Export codec functions
+export Codec, ComplexCodec, JAMCodec, Decoder
 
 end # module JAM

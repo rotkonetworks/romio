@@ -2,8 +2,6 @@
 # bls signatures for jam validators using blst library
 
 module BLS
-import .BLS: BlsPublicKey, BlsSignature
-
 using StaticArrays
 
 # load the shared library from deps
@@ -22,7 +20,7 @@ const BlsPublicKey = SVector{144, UInt8}  # jam spec: 144 bytes
 const BlsSignature = SVector{96, UInt8}
 
 # domain separation tag for jam beefy
-const JAM_BEEFY_DST = b"\$jam_beefy"
+const JAM_BEEFY_DST = b"$jam_beefy"
 
 # generate secret key from seed
 function keygen(seed::Vector{UInt8})::BlsSecretKey
