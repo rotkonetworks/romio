@@ -1,28 +1,33 @@
 using Test
-using JAM
 
-@testset "JAM Protocol Tests" begin
-    @testset "Blake2b Hash" begin
-        data = b"test"
-        h = JAM.H(data)
-        @test length(h) == 32
-        @test h != JAM.H0
+# include test modules
+include("test_hash.jl")
+include("test_codec.jl")
+include("test_bls.jl")
+include("test_transitions.jl")
+
+println("Running all JAMit tests...")
+println("=" ^ 50)
+
+@testset "JAMit Complete Test Suite" begin
+    # run all test modules
+    @testset "Hashing Tests" begin
+        include("test_hash.jl")
     end
-    
-    @testset "Erasure Coding" begin
-        enc = JAM.JAMErasure()
-        data = zeros(UInt8, JAM.DS * 2)
-        encoded = JAM.encode_erasure(enc, data)
-        @test length(encoded) == JAM.V * 2  # Total shards
+
+    @testset "Codec Tests" begin
+        include("test_codec.jl")
     end
-    
-    @testset "Types" begin
-        item = JAM.WorkItem(
-            1, JAM.H0, UInt8[], 100, 200,
-            Tuple{JAM.Hash, UInt32}[], 
-            Tuple{JAM.Hash, UInt32}[], 
-            0
-        )
-        @test item.service == 1
+
+    @testset "BLS Tests" begin
+        include("test_bls.jl")
+    end
+
+    @testset "State Transition Tests" begin
+        include("test_transitions.jl")
     end
 end
+
+println("\n" * "=" ^ 50)
+println("All tests completed!")
+println("=" ^ 50)
