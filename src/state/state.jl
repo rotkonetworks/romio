@@ -4,13 +4,15 @@
 using StaticArrays
 using DataStructures
 
-# include merkle mountain range
+# include state-specific types
+include("types.jl")
 
 struct RecentBlock
    header_hash::Hash
    state_root::Hash
    accumulation_root::Hash
-   work_packages::Dict{Hash, Hash}
+   reported_packages::Set{Hash}
+   seal::Union{Nothing, BandersnatchSig}
 end
 
 struct SafroleState
@@ -25,6 +27,7 @@ struct JudgmentState
    bad_reports::Set{Hash}
    wonky_reports::Set{Hash}
    offenders::Set{Ed25519Key}
+   punish_set::Set{ValidatorId}
 end
 
 struct PrivilegeState
@@ -73,7 +76,7 @@ mutable struct State
    previous_validators::Vector{ValidatorKey}
    
    # pending reports (ρ)
-   pending_reports::Vector{Union{Nothing, Tuple{WorkReport, TimeSlot}}}
+   pending_reports::Vector{Union{Nothing, PendingReport}}
    
    # timeslot (τ)
    timeslot::TimeSlot
@@ -84,14 +87,14 @@ mutable struct State
    # statistics (π)
    statistics::StatisticsState
    
-   # accumulation queue (ω)
-   accumulation_queue::Vector{Vector{Tuple{WorkReport, Set{Hash}}}}
-   
-   # accumulation history (ξ)
-   accumulation_history::Vector{Set{Hash}}
-   
-   # recent outputs (θ)
-   recent_outputs::Vector{Tuple{ServiceId, Hash}}
+   # ready queue (ω)
+   ready::Vector{Tuple{WorkReport, Set{Hash}}}
+
+   # accumulated packages (ξ)
+   accumulated::Set{Hash}
+
+   # last accumulation results (θ)
+   last_accumulation::Vector{AccumulationEntry}
 end
 
 # create initial empty state
@@ -121,7 +124,8 @@ function initial_state()::State
            Set{Hash}(),
            Set{Hash}(),
            Set{Hash}(),
-           Set{Ed25519Key}()
+           Set{Ed25519Key}(),
+           Set{ValidatorId}()
        ),
        
        # entropy
@@ -154,32 +158,18 @@ function initial_state()::State
            Dict{ServiceId, ServiceStats}()
        ),
        
-       # accumulation queue
-       Vector{Vector{Tuple{WorkReport, Set{Hash}}}}(),
-       
-       # accumulation history
-       Vector{Set{Hash}}(),
-       
-       # recent outputs
-       Vector{Tuple{ServiceId, Hash}}()
+       # ready queue
+       Vector{Tuple{WorkReport, Set{Hash}}}(),
+
+       # accumulated packages
+       Set{Hash}(),
+
+       # last accumulation
+       Vector{AccumulationEntry}()
    )
 end
 
 # get accumulation root from belt
 function get_accumulation_root(state::State)::Hash
-   belt_superpeak(state.accumulation_log)
-end
-
-# add accumulation output to state
-function add_accumulation_output!(state::State, service::ServiceId, output::Hash)
-   # append to merkle mountain belt
-   belt_append!(state.accumulation_log, service, output)
-   
-   # update recent outputs
-   push!(state.recent_outputs, (service, output))
-   
-   # keep only last 1024 outputs
-   if length(state.recent_outputs) > 1024
-       popfirst!(state.recent_outputs)
-   end
+   state.accumulation_log.root
 end

@@ -1,33 +1,24 @@
 # src/types/service.jl
 # service account types
 
-struct ServiceAccount
+mutable struct ServiceAccount
     storage::Dict{Blob, Blob}
     preimages::Dict{Hash, Blob}
     preimage_meta::Dict{Tuple{Hash, UInt32}, Vector{TimeSlot}}
     code_hash::Hash
     balance::Balance
-    gas_refine::Gas
-    gas_accumulate::Gas
-    gratis_offset::Balance
-    creation_slot::TimeSlot
+    threshold_gas::Gas
+    min_gas_limit::Gas
     last_accumulation::TimeSlot
-    parent_service::ServiceId
-    
-    # computed fields (cached)
-    item_count::UInt32
-    octet_count::UInt64
-    threshold_balance::Balance
+    preimage_requests::Set{Hash}
 end
 
 # create new service account
 function new_service(
     code_hash::Hash,
     balance::Balance,
-    gas_refine::Gas,
-    gas_accumulate::Gas,
-    parent::ServiceId,
-    slot::TimeSlot
+    threshold_gas::Gas,
+    min_gas_limit::Gas
 )::ServiceAccount
     ServiceAccount(
         Dict{Blob, Blob}(),
@@ -35,13 +26,10 @@ function new_service(
         Dict{Tuple{Hash, UInt32}, Vector{TimeSlot}}(),
         code_hash,
         balance,
-        gas_refine,
-        gas_accumulate,
+        threshold_gas,
+        min_gas_limit,
         0,
-        slot,
-        0,
-        parent,
-        0, 0, BS
+        Set{Hash}()
     )
 end
 

@@ -30,3 +30,24 @@ const H0 = Hash(zeros(UInt8, 32))
 struct Tagged{T}
     value::T
 end
+
+# generic encoding function
+function encode(x)::Vector{UInt8}
+    # simplified encoding - serialize struct to bytes
+    io = IOBuffer()
+    # write type fields sequentially
+    for field in fieldnames(typeof(x))
+        value = getfield(x, field)
+        if isa(value, Vector{UInt8})
+            write(io, value)
+        elseif isa(value, Integer)
+            write(io, value)
+        elseif isa(value, SVector)
+            write(io, value)
+        else
+            # recursively encode complex types
+            write(io, encode(value))
+        end
+    end
+    return take!(io)
+end
