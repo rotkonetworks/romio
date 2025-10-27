@@ -1,5 +1,8 @@
 # complete state transition implementation following graypaper
 
+# Constant for zeroed validator (used in filter_offenders)
+const ZEROED_VALIDATOR = ValidatorKey(zeros(UInt8, 32), zeros(UInt8, 32), zeros(UInt8, 144))
+
 function state_transition(state::State, block::Block)::State
     new_state = deepcopy(state)
     H = block.header
@@ -56,10 +59,13 @@ end
 # entropy update per safrole
 function update_entropy!(state::State, header::Header)
     # accumulate vrf output
+    hash_input = Vector{UInt8}(undef, 64)
+    copyto!(hash_input, 1, state.entropy[1], 1, 32)
+    copyto!(hash_input, 33, banderout(header.vrf_signature), 1, 32)
     state.entropy = (
-        H(vcat(state.entropy[1], banderout(header.vrf_signature))),
+        H(hash_input),
         state.entropy[2],
-        state.entropy[3], 
+        state.entropy[3],
         state.entropy[4]
     )
     
@@ -90,8 +96,7 @@ function update_validators!(state::State, header::Header)
 end
 
 function filter_offenders(validators::Vector{ValidatorKey}, offenders::Set{Ed25519Key})
-    return [v.ed25519 in offenders ? ValidatorKey(zeros(32), zeros(32), zeros(144)) : v 
-            for v in validators]
+    return [v.ed25519 in offenders ? ZEROED_VALIDATOR : v for v in validators]
 end
 
 # process assurances and determine available reports
@@ -99,51 +104,51 @@ function process_assurances!(state::State, assurances::AssuranceExtrinsic, repor
     # count assurances per core
     counts = zeros(Int, C)
     for assurance in assurances.assurances
-        for (core, assured) in enumerate(assurance.bitfield)
+        @inbounds for (core, assured) in enumerate(assurance.bitfield)
             if assured && reports_post_judgement[core] !== nothing
                 counts[core] += 1
             end
         end
     end
-    
+
     # clear timed-out or available reports
     threshold = div(2 * V, 3) + 1
     reports_post_guarantees = copy(reports_post_judgement)
-    
-    for core in 1:C
+
+    @inbounds for core in 1:C
         report = reports_post_guarantees[core]
         if report !== nothing
             timed_out = state.timeslot >= report.timestamp + U
             available = counts[core] >= threshold
-            
+
             if timed_out || available
                 reports_post_guarantees[core] = nothing
             end
         end
     end
-    
+
     return reports_post_guarantees
 end
 
 function collect_available_reports(state::State, assurances::AssuranceExtrinsic, reports_post_judgement)
     available = WorkReport[]
     counts = zeros(Int, C)
-    
+
     for assurance in assurances.assurances
-        for (core, assured) in enumerate(assurance.bitfield)
+        @inbounds for (core, assured) in enumerate(assurance.bitfield)
             if assured && reports_post_judgement[core] !== nothing
                 counts[core] += 1
             end
         end
     end
-    
+
     threshold = div(2 * V, 3) + 1
-    for core in 1:C
+    @inbounds for core in 1:C
         if counts[core] >= threshold && reports_post_judgement[core] !== nothing
             push!(available, reports_post_judgement[core].workreport)
         end
     end
-    
+
     return available
 end
 
@@ -171,9 +176,9 @@ function accumulate_reports!(state::State, available_reports::Vector{WorkReport}
     accumulated_hashes = Set([hash_work_package(r) for r in immediate])
     
     while !isempty(queued)
-        processable = []
-        remaining = []
-        
+        processable = WorkReport[]
+        remaining = Tuple{WorkReport, Set{Hash}}[]
+
         for (report, deps) in queued
             satisfied_deps = deps ∩ accumulated_hashes
             if length(satisfied_deps) == length(deps)
@@ -196,7 +201,7 @@ function accumulate_reports!(state::State, available_reports::Vector{WorkReport}
     end
     
     # update ready queue with unprocessable reports
-    state.ready = vcat(state.ready, [(r, d) for (r, d) in queued])
+    append!(state.ready, queued)
 end
 
 function accumulate_single_report!(state::State, report::WorkReport)
@@ -278,7 +283,9 @@ function process_tickets!(state::State, header::Header, tickets::TicketExtrinsic
     end
     
     # merge and keep best tickets
-    all_tickets = vcat(state.safrole.ticket_accumulator, new_tickets)
+    all_tickets = Vector{Ticket}(undef, length(state.safrole.ticket_accumulator) + length(new_tickets))
+    copyto!(all_tickets, 1, state.safrole.ticket_accumulator, 1, length(state.safrole.ticket_accumulator))
+    copyto!(all_tickets, length(state.safrole.ticket_accumulator) + 1, new_tickets, 1, length(new_tickets))
     sort!(all_tickets, by=t->t.identifier)
     state.safrole.ticket_accumulator = all_tickets[1:min(E, length(all_tickets))]
 end
@@ -304,10 +311,12 @@ function compute_ring_root(validators::Vector{ValidatorKey})::Hash
     if isempty(validators)
         return zeros(32)
     end
-    # simplified merkle computation
-    data = UInt8[]
-    for v in validators
-        append!(data, v.bandersnatch)
+    # simplified merkle computation - pre-allocate
+    data = Vector{UInt8}(undef, 32 * length(validators))
+    pos = 1
+    @inbounds for v in validators
+        copyto!(data, pos, v.bandersnatch, 1, 32)
+        pos += 32
     end
     return H(data)
 end
@@ -531,6 +540,14 @@ function compute_mmb_root(peaks::Vector{Hash})::Hash
     elseif length(peaks) == 1
         return peaks[1]
     else
-        return H(vcat(peaks...))
+        # Pre-allocate buffer for all peaks
+        total_size = 32 * length(peaks)
+        hash_input = Vector{UInt8}(undef, total_size)
+        pos = 1
+        for peak in peaks
+            copyto!(hash_input, pos, peak, 1, 32)
+            pos += 32
+        end
+        return H(hash_input)
     end
 end

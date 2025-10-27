@@ -54,7 +54,8 @@ function encode_work_package(
     end
 
     # Pad with zeros
-    padded_data = vcat(package_data, zeros(UInt8, total_data_size - length(package_data)))
+    padded_data = zeros(UInt8, total_data_size)
+    copyto!(padded_data, 1, package_data, 1, length(package_data))
 
     # Split into data segments
     data_segments = Vector{Vector{UInt8}}()
@@ -155,11 +156,16 @@ function reconstruct_from_data_segments(
     engine::ErasureEngine,
     segment_map::Dict{UInt16, Vector{UInt8}}
 )::Union{WorkPackage, Nothing}
-    # Concatenate data segments
-    data = Vector{UInt8}()
+    # Pre-allocate buffer for all data segments
+    total_size = engine.data_segments * engine.segment_size
+    data = Vector{UInt8}(undef, total_size)
+
+    pos = 1
     for i in 0:(engine.data_segments - 1)
         if haskey(segment_map, i)
-            append!(data, segment_map[i])
+            segment = segment_map[i]
+            copyto!(data, pos, segment, 1, length(segment))
+            pos += length(segment)
         else
             return nothing  # missing data segment
         end
@@ -187,22 +193,28 @@ function reconstruct_with_erasure_decoding(
     # Create decoding matrix (simplified)
     decode_matrix = Matrix{Float64}(I, engine.data_segments, engine.data_segments)
 
-    # Reconstruct data segments
-    reconstructed_data = Vector{UInt8}()
+    # Pre-allocate buffer for reconstructed data
+    total_size = engine.data_segments * engine.segment_size
+    reconstructed_data = Vector{UInt8}(undef, total_size)
+
+    pos = 1
     for segment_idx in 0:(engine.data_segments - 1)
         if segment_idx in reconstruction_indices
             # Use original segment
-            append!(reconstructed_data, segment_map[segment_idx])
+            segment = segment_map[segment_idx]
+            copyto!(reconstructed_data, pos, segment, 1, length(segment))
+            pos += length(segment)
         else
             # Reconstruct missing segment (simplified)
-            reconstructed_segment = zeros(UInt8, engine.segment_size)
+            segment_view = @view reconstructed_data[pos:pos+engine.segment_size-1]
+            fill!(segment_view, 0x00)
             for (i, avail_idx) in enumerate(reconstruction_indices)
                 weight = decode_matrix[segment_idx + 1, i]
-                for j in 1:engine.segment_size
-                    reconstructed_segment[j] += UInt8(weight * segment_map[avail_idx][j]) & 0xFF
+                @inbounds for j in 1:engine.segment_size
+                    segment_view[j] += UInt8(weight * segment_map[avail_idx][j]) & 0xFF
                 end
             end
-            append!(reconstructed_data, reconstructed_segment)
+            pos += engine.segment_size
         end
     end
 
@@ -276,7 +288,10 @@ function generate_merkle_proof(
             end
 
             # Compute parent hash
-            parent_hash = H(vcat(left, right))
+            hash_input = Vector{UInt8}(undef, 64)
+            copyto!(hash_input, 1, left, 1, 32)
+            copyto!(hash_input, 33, right, 1, 32)
+            parent_hash = H(hash_input)
             push!(next_hashes, parent_hash)
         end
 
@@ -297,13 +312,20 @@ function verify_merkle_proof(
     current_hash = segment_hash
     current_index = segment_index
 
+    # Pre-allocate buffer for hash concatenation
+    hash_input = Vector{UInt8}(undef, 64)
+
     for sibling_hash in proof
         if current_index % 2 == 1
             # We're the left child
-            current_hash = H(vcat(current_hash, sibling_hash))
+            copyto!(hash_input, 1, current_hash, 1, 32)
+            copyto!(hash_input, 33, sibling_hash, 1, 32)
+            current_hash = H(hash_input)
         else
             # We're the right child
-            current_hash = H(vcat(sibling_hash, current_hash))
+            copyto!(hash_input, 1, sibling_hash, 1, 32)
+            copyto!(hash_input, 33, current_hash, 1, 32)
+            current_hash = H(hash_input)
         end
         current_index = (current_index - 1) ÷ 2 + 1
     end

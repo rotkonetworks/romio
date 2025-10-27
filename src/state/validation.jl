@@ -58,9 +58,12 @@ function validate_extrinsic(extrinsic::Extrinsic, state::State)::Tuple{Bool, Str
         end
 
         # check validators are unique
-        validator_indices = [cred[1] for cred in guarantee.credentials]
-        if length(unique(validator_indices)) != length(validator_indices)
-            return (false, "Duplicate validators in guarantee")
+        validator_set = Set{Int}()
+        for cred in guarantee.credentials
+            if cred[1] in validator_set
+                return (false, "Duplicate validators in guarantee")
+            end
+            push!(validator_set, cred[1])
         end
     end
 

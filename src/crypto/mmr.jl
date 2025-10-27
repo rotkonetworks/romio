@@ -39,7 +39,10 @@ function append_recursive!(peaks::Vector{Union{Nothing, Hash}}, leaf::Hash, idx:
        return peaks
    else
        # slot occupied - merge and continue
-       merged = H(vcat(peaks[idx], leaf))
+       hash_input = Vector{UInt8}(undef, 64)
+       copyto!(hash_input, 1, peaks[idx], 1, 32)
+       copyto!(hash_input, 33, leaf, 1, 32)
+       merged = H(hash_input)
        peaks[idx] = nothing
        append_recursive!(peaks, merged, idx + 1, H)
    end
@@ -50,17 +53,25 @@ encode mmr to bytes for serialization
 """
 function mmr_encode(mmr::MerkleMountainRange)::Vector{UInt8}
    # encode as sequence of optional hashes
-   result = UInt8[]
-   
-   for peak in mmr.peaks
+   # Calculate size: each peak is either 1 byte (none) or 1 + 32 bytes (some + hash)
+   num_some = count(p -> p !== nothing, mmr.peaks)
+   num_none = length(mmr.peaks) - num_some
+   size = num_none + num_some * 33
+
+   result = Vector{UInt8}(undef, size)
+   pos = 1
+
+   @inbounds for peak in mmr.peaks
        if peak === nothing
-           push!(result, 0x00)  # none marker
+           result[pos] = 0x00  # none marker
+           pos += 1
        else
-           push!(result, 0x01)  # some marker
-           append!(result, peak)
+           result[pos] = 0x01  # some marker
+           copyto!(result, pos + 1, peak, 1, 32)
+           pos += 33
        end
    end
-   
+
    return result
 end
 
@@ -79,8 +90,13 @@ function mmr_superpeak(mmr::MerkleMountainRange)::Hash
    else
        # recursive hashing from left to right
        result = peaks[1]
+       hash_input = Vector{UInt8}(undef, 68)
+       peak_prefix = b"peak"
+       copyto!(hash_input, 1, peak_prefix, 1, 4)
        for i in 2:length(peaks)
-           result = Hash(keccak256(vcat(b"peak", result, peaks[i])))
+           copyto!(hash_input, 5, result, 1, 32)
+           copyto!(hash_input, 37, peaks[i], 1, 32)
+           result = Hash(keccak256(hash_input))
        end
        return result
    end
@@ -161,8 +177,16 @@ append accumulation output to belt
 """
 function belt_append!(belt::MerkleMountainBelt, service::ServiceId, output::Hash)
    # create leaf hash from service and output
-   leaf_data = vcat(encode_uint32(service), output)
-   leaf = Hash(keccak256(vcat(b"accout", leaf_data)))
+   leaf_data = Vector{UInt8}(undef, 36)
+   service_bytes = encode_uint32(service)
+   copyto!(leaf_data, 1, service_bytes, 1, 4)
+   copyto!(leaf_data, 5, output, 1, 32)
+
+   hash_input = Vector{UInt8}(undef, 42)
+   accout_prefix = b"accout"
+   copyto!(hash_input, 1, accout_prefix, 1, 6)
+   copyto!(hash_input, 7, leaf_data, 1, 36)
+   leaf = Hash(keccak256(hash_input))
    
    # append to underlying mmr
    mmr_append!(belt.mmr, leaf)

@@ -242,14 +242,25 @@ function create_vrf_signature(
     entropy::Hash,
     timeslot::TimeSlot
 )::BandersnatchSig
-    # VRF input: entropy + timeslot
-    message = vcat(entropy, reinterpret(UInt8, [timeslot]))
+    # VRF input: entropy + timeslot (32 + 4 = 36 bytes)
+    message = Vector{UInt8}(undef, 36)
+    copyto!(message, 1, entropy, 1, 32)
+    timeslot_bytes = reinterpret(UInt8, [timeslot])
+    copyto!(message, 33, timeslot_bytes, 1, 4)
 
-    # Create deterministic but unpredictable output
-    output = H(vcat(validator.bandersnatch, message))
+    # Hash input: bandersnatch key + message (32 + 36 = 68 bytes)
+    hash_input = Vector{UInt8}(undef, 68)
+    copyto!(hash_input, 1, validator.bandersnatch, 1, 32)
+    copyto!(hash_input, 33, message, 1, 36)
+    output = H(hash_input)
 
-    # Return as signature (simplified)
-    return BandersnatchSig(vcat(output, zeros(UInt8, 64)))
+    # Return as signature: output + 64 zero bytes (32 + 64 = 96 bytes)
+    result = Vector{UInt8}(undef, 96)
+    copyto!(result, 1, output, 1, 32)
+    @inbounds for i in 33:96
+        result[i] = 0x00
+    end
+    return BandersnatchSig(result)
 end
 
 # Encode header without seal field
