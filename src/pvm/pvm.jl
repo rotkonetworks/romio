@@ -45,6 +45,13 @@ mutable struct Memory
     end
 end
 
+# Inner PVM guest machine state
+mutable struct GuestPVM
+    code::Vector{UInt8}  # program blob
+    ram::Memory  # guest memory (separate from parent)
+    pc::UInt32  # guest program counter
+end
+
 mutable struct PVMState
     pc::UInt32  # program counter (instruction pointer)
     gas::Int64  # gas remaining (can go negative)
@@ -60,6 +67,9 @@ mutable struct PVMState
 
     # export segments (for export host call)
     exports::Vector{Vector{UInt8}}  # list of exported memory segments
+
+    # inner PVM machines (for machine/peek/poke/pages/invoke/expunge host calls)
+    machines::Dict{UInt32, GuestPVM}  # machine_id => guest PVM
 end
 
 # decode program blob per spec
@@ -1654,7 +1664,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
         instructions,
         opcode_mask,
         jump_table,
-        Vector{UInt8}[]  # exports
+        Vector{UInt8}[],  # exports
+        Dict{UInt32, GuestPVM}()  # machines
     )
     
     # setup memory layout
@@ -1727,7 +1738,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         instructions,
         opcode_mask,
         jump_table,
-        Vector{UInt8}[]  # exports
+        Vector{UInt8}[],  # exports
+        Dict{UInt32, GuestPVM}()  # machines
     )
 
     # setup memory layout

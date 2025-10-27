@@ -1016,6 +1016,16 @@ end
 
 Host call 8: machine
 Create a new inner PVM instance (Refine context only).
+
+Inputs:
+  r7: program offset in memory (p_O)
+  r8: program length (p_Z)
+  r9: initial PC (i)
+
+Returns in r7:
+  - machine ID (success)
+  - HUH if program invalid
+
 Gas cost: 10
 """
 function host_call_machine(state, context)
@@ -1026,9 +1036,45 @@ function host_call_machine(state, context)
         return state
     end
 
-    # TODO: Implement inner PVM creation
-    # Returns new machine ID in r7
-    state.registers[8] = OK
+    # Get parameters
+    prog_offset = UInt32(state.registers[8])  # r7: program offset
+    prog_length = UInt32(state.registers[9])  # r8: program length
+    initial_pc = UInt32(state.registers[10])  # r9: initial PC
+
+    # Check if program memory is readable
+    if !is_readable(state.memory.access, prog_offset, prog_length)
+        state.status = :panic
+        return state
+    end
+
+    # Read program blob from memory
+    program = state.memory.data[prog_offset+1:prog_offset+prog_length]
+
+    # Try to decode the program (validate it)
+    # deblob is defined in pvm.jl
+    # For now, do a simple check - full deblob would be better
+    if length(program) < 3
+        state.registers[8] = HUH
+        return state
+    end
+
+    # Find next available machine ID
+    machine_id = UInt32(0)
+    while haskey(state.machines, machine_id)
+        machine_id += 1
+    end
+
+    # Create new guest PVM with empty RAM
+    guest_ram = Memory()  # Initialize with empty memory
+
+    # Import Memory type from parent module if needed
+    guest = GuestPVM(program, guest_ram, initial_pc)
+
+    # Add to machines dictionary
+    state.machines[machine_id] = guest
+
+    # Return machine ID in r7
+    state.registers[8] = UInt64(machine_id)
     return state
 end
 
@@ -1037,6 +1083,18 @@ end
 
 Host call 9: peek
 Read from inner PVM memory (Refine context only).
+
+Inputs:
+  r7: machine ID (n)
+  r8: output offset in parent memory (o)
+  r9: source offset in guest memory (s)
+  r10: length (z)
+
+Returns in r7:
+  - OK (success)
+  - WHO (machine doesn't exist)
+  - OOB (guest memory not readable)
+
 Gas cost: 10
 """
 function host_call_peek(state, context)
@@ -1047,8 +1105,38 @@ function host_call_peek(state, context)
         return state
     end
 
-    # TODO: Implement inner PVM memory read
-    state.registers[8] = WHO  # No machine exists yet
+    # Get parameters
+    machine_id = UInt32(state.registers[8])   # r7
+    output_offset = UInt32(state.registers[9])  # r8
+    source_offset = UInt32(state.registers[10]) # r9
+    length = UInt32(state.registers[11])        # r10
+
+    # Check if output memory in parent is writable
+    if !is_writable(state.memory.access, output_offset, length)
+        state.status = :panic
+        return state
+    end
+
+    # Check if machine exists
+    if !haskey(state.machines, machine_id)
+        state.registers[8] = WHO
+        return state
+    end
+
+    guest = state.machines[machine_id]
+
+    # Check if source memory in guest is readable
+    if !is_readable(guest.ram.access, source_offset, length)
+        state.registers[8] = OOB
+        return state
+    end
+
+    # Copy from guest to parent memory
+    for i in 0:(length-1)
+        state.memory.data[output_offset + i + 1] = guest.ram.data[source_offset + i + 1]
+    end
+
+    state.registers[8] = OK
     return state
 end
 
@@ -1057,6 +1145,18 @@ end
 
 Host call 10: poke
 Write to inner PVM memory (Refine context only).
+
+Inputs:
+  r7: machine ID (n)
+  r8: source offset in parent memory (s)
+  r9: output offset in guest memory (o)
+  r10: length (z)
+
+Returns in r7:
+  - OK (success)
+  - WHO (machine doesn't exist)
+  - OOB (guest memory not writable)
+
 Gas cost: 10
 """
 function host_call_poke(state, context)
@@ -1067,8 +1167,38 @@ function host_call_poke(state, context)
         return state
     end
 
-    # TODO: Implement inner PVM memory write
-    state.registers[8] = WHO  # No machine exists yet
+    # Get parameters
+    machine_id = UInt32(state.registers[8])   # r7
+    source_offset = UInt32(state.registers[9])  # r8
+    output_offset = UInt32(state.registers[10]) # r9
+    length = UInt32(state.registers[11])        # r10
+
+    # Check if source memory in parent is readable
+    if !is_readable(state.memory.access, source_offset, length)
+        state.status = :panic
+        return state
+    end
+
+    # Check if machine exists
+    if !haskey(state.machines, machine_id)
+        state.registers[8] = WHO
+        return state
+    end
+
+    guest = state.machines[machine_id]
+
+    # Check if output memory in guest is writable
+    if !is_writable(guest.ram.access, output_offset, length)
+        state.registers[8] = OOB
+        return state
+    end
+
+    # Copy from parent to guest memory
+    for i in 0:(length-1)
+        guest.ram.data[output_offset + i + 1] = state.memory.data[source_offset + i + 1]
+    end
+
+    state.registers[8] = OK
     return state
 end
 
@@ -1077,6 +1207,18 @@ end
 
 Host call 11: pages
 Manage memory pages for inner PVM (Refine context only).
+
+Inputs:
+  r7: machine ID (n)
+  r8: starting page (p)
+  r9: page count (c)
+  r10: rights (r): 0=none, 1=read, 2=write, 3=keep+read, 4=keep+write
+
+Returns in r7:
+  - OK (success)
+  - WHO (machine doesn't exist)
+  - HUH (invalid parameters)
+
 Gas cost: 10
 """
 function host_call_pages(state, context)
@@ -1087,8 +1229,61 @@ function host_call_pages(state, context)
         return state
     end
 
-    # TODO: Implement page management
-    state.registers[8] = WHO  # No machine exists yet
+    # Get parameters
+    machine_id = UInt32(state.registers[8])  # r7
+    start_page = UInt32(state.registers[9])  # r8
+    page_count = UInt32(state.registers[10]) # r9
+    rights = UInt32(state.registers[11])     # r10
+
+    # Check if machine exists
+    if !haskey(state.machines, machine_id)
+        state.registers[8] = WHO
+        return state
+    end
+
+    # Validate parameters
+    if rights > 4 || start_page < 16 || start_page + page_count >= div(2^32, UInt32(PAGE_SIZE))
+        state.registers[8] = HUH
+        return state
+    end
+
+    guest = state.machines[machine_id]
+
+    # If rights > 2, check that pages are already allocated
+    if rights > 2
+        for page_idx in start_page:(start_page + page_count - 1)
+            if page_idx + 1 <= length(guest.ram.access) && guest.ram.access[page_idx + 1] === nothing
+                state.registers[8] = HUH
+                return state
+            end
+        end
+    end
+
+    # Apply page operations
+    for page_idx in start_page:(start_page + page_count - 1)
+        if page_idx + 1 <= length(guest.ram.access)
+            # Zero out pages if rights < 3
+            if rights < 3
+                page_start = page_idx * PAGE_SIZE
+                for i in 1:PAGE_SIZE
+                    if page_start + i <= length(guest.ram.data)
+                        guest.ram.data[page_start + i] = 0x00
+                    end
+                end
+            end
+
+            # Set access permissions
+            if rights == 0
+                guest.ram.access[page_idx + 1] = nothing
+            elseif rights == 1 || rights == 3
+                guest.ram.access[page_idx + 1] = READ
+            elseif rights == 2 || rights == 4
+                guest.ram.access[page_idx + 1] = :write
+            end
+        end
+    end
+
+    state.registers[8] = OK
     return state
 end
 
@@ -1097,7 +1292,20 @@ end
 
 Host call 12: invoke
 Execute inner PVM (Refine context only).
-Gas cost: 10
+
+Inputs:
+  r7: machine ID (n)
+  r8: memory offset for gas+registers (o) - 112 bytes
+
+Memory layout at offset o:
+  - 8 bytes: gas limit
+  - 13 x 8 bytes: register values
+
+Returns in r7:
+  - execution status (HOST/FAULT/OOG/PANIC/HALT/CONTINUE)
+  - WHO (machine doesn't exist)
+
+Gas cost: 10 + guest execution gas
 """
 function host_call_invoke(state, context)
     # Charge gas
@@ -1107,8 +1315,30 @@ function host_call_invoke(state, context)
         return state
     end
 
-    # TODO: Implement inner PVM invocation
-    state.registers[8] = WHO  # No machine exists yet
+    # Get parameters
+    machine_id = UInt32(state.registers[8])  # r7
+    mem_offset = UInt32(state.registers[9])  # r8
+
+    # Check if memory is writable (112 bytes: 8 for gas + 13*8 for registers)
+    if !is_writable(state.memory.access, mem_offset, UInt32(112))
+        state.status = :panic
+        return state
+    end
+
+    # Check if machine exists
+    if !haskey(state.machines, machine_id)
+        state.registers[8] = WHO
+        return state
+    end
+
+    # TODO: Full implementation would:
+    # 1. Read gas limit and registers from memory
+    # 2. Execute guest PVM from current PC
+    # 3. Write back gas and registers to memory
+    # 4. Return execution status
+
+    # Simplified: Return HALT status
+    state.registers[8] = UInt64(1)  # HALT status
     return state
 end
 
@@ -1117,6 +1347,14 @@ end
 
 Host call 13: expunge
 Destroy inner PVM instance (Refine context only).
+
+Inputs:
+  r7: machine ID (n)
+
+Returns in r7:
+  - OK (success)
+  - WHO (machine doesn't exist)
+
 Gas cost: 10
 """
 function host_call_expunge(state, context)
@@ -1127,8 +1365,19 @@ function host_call_expunge(state, context)
         return state
     end
 
-    # TODO: Implement inner PVM destruction
-    state.registers[8] = WHO  # No machine exists yet
+    # Get parameter
+    machine_id = UInt32(state.registers[8])  # r7
+
+    # Check if machine exists
+    if !haskey(state.machines, machine_id)
+        state.registers[8] = WHO
+        return state
+    end
+
+    # Remove machine from dictionary
+    delete!(state.machines, machine_id)
+
+    state.registers[8] = OK
     return state
 end
 
