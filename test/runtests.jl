@@ -1,26 +1,35 @@
 using Test
 
-# include test modules
-include("test_hash.jl")
-include("test_codec.jl")
-include("test_bls.jl")
-include("test_transitions.jl")
-
-println("Running all JAMit tests...")
-println("=" ^ 50)
+println("Running JAMit Complete Test Suite...")
+println("=" ^ 70)
 
 @testset "JAMit Complete Test Suite" begin
-    # run all test modules
-    @testset "Hashing Tests" begin
-        include("test_hash.jl")
+    @testset "Core Functionality Tests" begin
+        @testset "Hashing Tests" begin
+            include("test_hash.jl")
+        end
+
+        @testset "Codec Tests" begin
+            include("test_codec.jl")
+        end
+
+        @testset "BLS Tests" begin
+            include("test_bls.jl")
+        end
     end
 
-    @testset "Codec Tests" begin
-        include("test_codec.jl")
-    end
+    @testset "Optimization Tests" begin
+        @testset "Serialization Roundtrip Tests" begin
+            include("test_serialization_roundtrip.jl")
+        end
 
-    @testset "BLS Tests" begin
-        include("test_bls.jl")
+        @testset "Performance Benchmarks" begin
+            include("test_performance.jl")
+        end
+
+        @testset "Integration Tests" begin
+            include("test_integration.jl")
+        end
     end
 
     @testset "State Transition Tests" begin
@@ -28,6 +37,6 @@ println("=" ^ 50)
     end
 end
 
-println("\n" * "=" ^ 50)
-println("All tests completed!")
-println("=" ^ 50)
+println("\n" * "=" ^ 70)
+println("✅ All tests completed successfully!")
+println("=" ^ 70)
