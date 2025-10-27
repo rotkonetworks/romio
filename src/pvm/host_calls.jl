@@ -871,19 +871,58 @@ end
     host_call_export(state, context)
 
 Host call 7: export
-Export a segment (Refine context only).
-Gas cost: 10
+Export a memory segment to the export list (Refine and Is-Authorized contexts).
+Inputs:
+  r7: memory address to read from
+  r8: length of data to export
+  r9: memory address to write gas consumed
+
+Returns in r7: result code (OK, OOB)
+Gas cost: 10 + length
 """
 function host_call_export(state, context)
-    # Charge gas
-    state.gas -= 10
+    # Get parameters
+    mem_addr = UInt32(state.registers[8])  # r7
+    length = UInt32(state.registers[9])     # r8
+    gas_addr = UInt32(state.registers[10])  # r9
+
+    # Calculate gas cost: 10 base + length
+    gas_cost = 10 + Int64(length)
+    state.gas -= gas_cost
+
     if state.gas < 0
         state.status = :oog
         return state
     end
 
-    # TODO: Implement segment export
-    # Reads from memory and appends to export list
+    # Check if memory range is readable
+    if !is_readable(state.memory.access, mem_addr, length)
+        state.registers[8] = OOB
+        return state
+    end
+
+    # Check if gas_addr is writable (8 bytes for UInt64)
+    if !is_writable(state.memory.access, gas_addr, UInt32(8))
+        state.registers[8] = OOB
+        return state
+    end
+
+    # Read memory segment
+    segment = Vector{UInt8}(undef, length)
+    for i in 1:length
+        segment[i] = state.memory.data[mem_addr + i]
+    end
+
+    # Add to exports list
+    push!(state.exports, segment)
+
+    # Write gas consumed to memory (little-endian UInt64)
+    gas_consumed = UInt64(gas_cost)
+    for i in 0:7
+        state.memory.data[gas_addr + i + 1] = UInt8((gas_consumed >> (8*i)) & 0xFF)
+    end
+
+    # Return success
     state.registers[8] = OK
     return state
 end

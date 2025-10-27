@@ -57,6 +57,9 @@ mutable struct PVMState
     instructions::Vector{UInt8}  # instruction bytes
     opcode_mask::BitVector  # marks opcode positions
     jump_table::Vector{UInt32}  # dynamic jump targets
+
+    # export segments (for export host call)
+    exports::Vector{Vector{UInt8}}  # list of exported memory segments
 end
 
 # decode program blob per spec
@@ -1635,7 +1638,7 @@ end
 function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
     result = deblob(program)
     if result === nothing
-        return (PANIC, UInt8[], 0)
+        return (PANIC, UInt8[], 0, Vector{UInt8}[])
     end
     
     instructions, opcode_mask, jump_table = result
@@ -1650,7 +1653,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
         0,  # host_call_id
         instructions,
         opcode_mask,
-        jump_table
+        jump_table,
+        Vector{UInt8}[]  # exports
     )
     
     # setup memory layout
@@ -1698,16 +1702,16 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
     else
         UInt8[]
     end
-    
+
     gas_used = initial_gas - max(state.gas, 0)
-    return (state.status, output, gas_used)
+    return (state.status, output, gas_used, state.exports)
 end
 
 # Overload with context parameter
 function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context)
     result = deblob(program)
     if result === nothing
-        return (PANIC, UInt8[], 0)
+        return (PANIC, UInt8[], 0, Vector{UInt8}[])
     end
 
     instructions, opcode_mask, jump_table = result
@@ -1722,7 +1726,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         0,  # host_call_id
         instructions,
         opcode_mask,
-        jump_table
+        jump_table,
+        Vector{UInt8}[]  # exports
     )
 
     # setup memory layout
@@ -1769,7 +1774,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     end
 
     gas_used = initial_gas - max(state.gas, 0)
-    return (state.status, output, gas_used)
+    return (state.status, output, gas_used, state.exports)
 end
 
 function setup_memory!(state::PVMState, input::Vector{UInt8})
