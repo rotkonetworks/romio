@@ -3,11 +3,21 @@ module PVM
 
 # No external dependencies - using native Julia arrays
 
+# Include host call interface
+include("host_calls.jl")
+using .HostCalls
+
 # constants
 const PAGE_SIZE = 4096  # 2^12 bytes
-const ZONE_SIZE = 65536  # 2^16 bytes  
+const ZONE_SIZE = 65536  # 2^16 bytes
 const MAX_INPUT = 16777216  # 2^24 bytes
 const DYNAM_ALIGN = 2  # dynamic address alignment
+
+# Helper function: round up to next page boundary
+@inline function P_func(addr::UInt32)::UInt32
+    page_mask = UInt32(PAGE_SIZE - 1)
+    return (addr + page_mask) & ~page_mask
+end
 
 # exit reasons
 const CONTINUE = :continue
@@ -25,11 +35,13 @@ const NONE = nothing
 mutable struct Memory
     data::Vector{UInt8}
     access::Vector{Union{Symbol, Nothing}}  # per-page access
-    
+    current_heap_pointer::UInt32  # Current heap top for sbrk
+
     function Memory()
         data = zeros(UInt8, 2^32)
         access = fill(NONE, div(2^32, PAGE_SIZE))
-        new(data, access)
+        # Heap pointer will be initialized in setup_memory!
+        new(data, access, UInt32(0))
     end
 end
 
@@ -39,7 +51,8 @@ mutable struct PVMState
     registers::Vector{UInt64}  # 13 general purpose registers
     memory::Memory
     status::Symbol  # execution status
-    
+    host_call_id::UInt32  # temporary storage for host call ID
+
     # program data
     instructions::Vector{UInt8}  # instruction bytes
     opcode_mask::BitVector  # marks opcode positions
@@ -288,8 +301,8 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
     elseif opcode == 0x0A  # ecalli
         imm = decode_immediate(state, 1, min(4, skip))
         state.status = HOST
-        # store host call id in registers for handler
-        state.registers[1] = imm
+        # store host call id in dedicated field (don't overwrite registers!)
+        state.host_call_id = UInt32(imm)
 
     elseif opcode == 16  # store_u32 sp-relative (0x10)
         # Store 32-bit value to [sp + offset]
@@ -381,9 +394,10 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         addr = (state.registers[ra + 1] + immx) % 2^32
-        
+
         # dynamic jump through table
-        if addr == 2^32 - 2^16
+        # Halt address: 2^32 - 2^16 = 0xFFFF0000 = 4294901760
+        if addr == UInt64(0xFFFF0000)
             state.status = HALT
         elseif addr == 0 || addr % DYNAM_ALIGN != 0
             state.status = PANIC
@@ -671,9 +685,46 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
     elseif opcode == 101  # sbrk
         rd = get_register_index(state, 1, 0)
         ra = get_register_index(state, 1, 1)
-        # heap allocation - simplified
-        state.registers[rd + 1] = 0x10000000  # example heap address
-        
+
+        # Get increment value from register ra
+        increment = Int64(state.registers[ra + 1])
+
+        # If increment == 0, query current heap pointer
+        if increment == 0
+            state.registers[rd + 1] = UInt64(state.memory.current_heap_pointer)
+        else
+            # Record current heap pointer to return
+            old_heap_pointer = state.memory.current_heap_pointer
+            state.registers[rd + 1] = UInt64(old_heap_pointer)
+
+            # Calculate new heap pointer
+            new_heap_pointer_64 = UInt64(state.memory.current_heap_pointer) + UInt64(increment)
+
+            # Bounds check - don't allow heap to grow beyond reasonable limits
+            if new_heap_pointer_64 > UInt64(0x80000000)  # Max 2GB heap
+                state.status = PANIC
+            else
+                next_page_boundary = P_func(state.memory.current_heap_pointer)
+
+                # If crossing page boundary, allocate new pages
+                if new_heap_pointer_64 > UInt64(next_page_boundary)
+                    final_boundary = P_func(UInt32(new_heap_pointer_64))
+                    idx_start = div(next_page_boundary, UInt32(PAGE_SIZE))
+                    idx_end = div(final_boundary, UInt32(PAGE_SIZE))
+
+                    # Allocate pages in the new range
+                    for page_idx in idx_start:(idx_end-1)
+                        if page_idx + 1 <= length(state.memory.access)
+                            state.memory.access[page_idx + 1] = :write
+                        end
+                    end
+                end
+
+                # Advance the heap pointer
+                state.memory.current_heap_pointer = UInt32(new_heap_pointer_64)
+            end
+        end
+
     elseif opcode == 102  # count_set_bits_64
         rd = get_register_index(state, 1, 0)
         ra = get_register_index(state, 1, 1)
@@ -791,13 +842,8 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         imm = decode_immediate(state, 2, min(skip - 1, 4))
         state.registers[rd + 1] = state.registers[rb + 1] + imm
 
-    elseif opcode == 0x32  # ret (return)
-        # Return jumps to address in RA register
-        state.pc = UInt32(state.registers[1])  # RA is register 0
-        if state.pc == 0xFFFF0000 || state.pc >= length(state.instructions)
-            state.status = HALT
-        end
-        return  # Don't increment PC
+    # Note: opcode 0x32 (50) is jump_ind, already handled above at line 379
+    # The "ret" instruction does not exist in the PVM spec
 
     # Add these instructions after opcode 111 and before 190:
 
@@ -1601,6 +1647,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
         zeros(UInt64, 13),
         Memory(),
         CONTINUE,
+        0,  # host_call_id
         instructions,
         opcode_mask,
         jump_table
@@ -1611,8 +1658,33 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
     
     # run until halt
     initial_gas = state.gas
-    while state.status == CONTINUE && state.gas > 0
-        step!(state)
+    # Empty context for now - will be populated when integrating with work packages
+    context = nothing
+    invocation_type = :refine  # Default to refine for testing
+
+    while state.gas > 0
+        if state.status == CONTINUE
+            step!(state)
+        elseif state.status == HOST
+            # Save PC before host call
+            pc_before = state.pc
+
+            # Handle host call
+            host_call_id = Int(state.host_call_id)
+            state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
+
+            # Resume execution if no error
+            if state.status == HOST
+                state.status = CONTINUE
+                # Advance PC past ecalli instruction
+                # ecalli format: opcode (1 byte) + immediate (skip bytes)
+                skip = skip_distance(state.opcode_mask, pc_before + 1)
+                state.pc = pc_before + 1 + skip
+            end
+        else
+            # HALT, PANIC, OOG, FAULT - stop execution
+            break
+        end
     end
     
     # check gas
@@ -1631,43 +1703,137 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
     return (state.status, output, gas_used)
 end
 
+# Overload with context parameter
+function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context)
+    result = deblob(program)
+    if result === nothing
+        return (PANIC, UInt8[], 0)
+    end
+
+    instructions, opcode_mask, jump_table = result
+
+    # initialize state
+    state = PVMState(
+        0,  # pc starts at 0
+        Int64(gas),
+        zeros(UInt64, 13),
+        Memory(),
+        CONTINUE,
+        0,  # host_call_id
+        instructions,
+        opcode_mask,
+        jump_table
+    )
+
+    # setup memory layout
+    setup_memory!(state, input)
+
+    # run until halt
+    initial_gas = state.gas
+    invocation_type = :refine  # Default to refine for testing
+
+    while state.gas > 0
+        if state.status == CONTINUE
+            step!(state)
+        elseif state.status == HOST
+            # Save PC before host call
+            pc_before = state.pc
+
+            # Handle host call with provided context
+            host_call_id = Int(state.host_call_id)
+            state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
+
+            # Resume execution if no error
+            if state.status == HOST
+                state.status = CONTINUE
+                # Advance PC past ecalli instruction
+                skip = skip_distance(state.opcode_mask, pc_before + 1)
+                state.pc = pc_before + 1 + skip
+            end
+        else
+            # HALT, PANIC, OOG, FAULT - stop execution
+            break
+        end
+    end
+
+    # check gas
+    if state.gas < 0
+        state.status = OOG
+    end
+
+    # extract output
+    output = if state.status == HALT
+        extract_output(state)
+    else
+        UInt8[]
+    end
+
+    gas_used = initial_gas - max(state.gas, 0)
+    return (state.status, output, gas_used)
+end
+
 function setup_memory!(state::PVMState, input::Vector{UInt8})
     # input at high memory (readable)
     input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
     for i in 1:min(length(input), MAX_INPUT)
         state.memory.data[input_start + i] = input[i]
     end
-    
+
     # mark input pages as readable
     for page in div(input_start, PAGE_SIZE):div(input_start + length(input), PAGE_SIZE)
         state.memory.access[page + 1] = READ
     end
-    
+
+    # Initialize heap pointer per traces/README.md memory model
+    # ro_data: 0x10000 (ZONE_SIZE)
+    # rw_data: 0x20000 (2*ZONE_SIZE)
+    # heap starts after rw_data + one page
+    rw_data_address = UInt32(2 * ZONE_SIZE)
+    state.memory.current_heap_pointer = rw_data_address + UInt32(PAGE_SIZE)
+
+    # Mark initial rw_data area as writable (up to heap start)
+    for page in div(rw_data_address, PAGE_SIZE):div(state.memory.current_heap_pointer - 1, PAGE_SIZE)
+        if page + 1 <= length(state.memory.access)
+            state.memory.access[page + 1] = :write
+        end
+    end
+
     # setup initial registers per spec
-    state.registers[1] = 2^32 - 2^16  # RA
-    state.registers[2] = 2^32 - 2*ZONE_SIZE - MAX_INPUT  # SP
-    state.registers[8] = input_start  # A0
-    state.registers[9] = length(input)  # A1
+    state.registers[1] = UInt64(0xFFFF0000)  # RA = 2^32 - 2^16 (halt address)
+    state.registers[2] = UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT)  # SP
+    state.registers[8] = UInt64(input_start)  # A0
+    state.registers[9] = UInt64(length(input))  # A1
 end
 
 function extract_output(state::PVMState)
     output_ptr = state.registers[8]
     output_len = state.registers[9]
-    
-    if output_len > MAX_INPUT
+
+    # Bounds check
+    if output_len > MAX_INPUT || output_len == 0
         return UInt8[]
     end
-    
+
+    if output_ptr + output_len > UInt64(2^32)
+        return UInt8[]
+    end
+
     output = UInt8[]
     for i in 0:output_len-1
         addr = output_ptr + i
         page = div(addr, PAGE_SIZE)
+
+        # Check page bounds
+        if page + 1 > length(state.memory.access)
+            return UInt8[]
+        end
+
         if state.memory.access[page + 1] != READ
             return UInt8[]
         end
         push!(output, state.memory.data[addr + 1])
     end
-    
+
     return output
 end
 
