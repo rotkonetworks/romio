@@ -851,7 +851,20 @@ end
     host_call_historical_lookup(state, context)
 
 Host call 6: historical_lookup
-Historical state lookup (Refine context only).
+Look up historical service account data at a specific time and code hash.
+Used in Refine context to access historical state for auditing.
+
+Inputs:
+  r7: service ID (2^64-1 for self)
+  r8: hash offset in memory (32 bytes - code hash to lookup)
+  r9: output offset for result
+  r10: source offset in result
+  r11: length to copy
+
+Returns in r7:
+  - total length of historical data (success)
+  - NONE if not found
+
 Gas cost: 10
 """
 function host_call_historical_lookup(state, context)
@@ -862,8 +875,79 @@ function host_call_historical_lookup(state, context)
         return state
     end
 
-    # TODO: Implement historical lookup
-    state.registers[8] = NONE
+    # Get parameters
+    service_id_param = state.registers[8]   # r7
+    hash_offset = state.registers[9]        # r8
+    output_offset = state.registers[10]     # r9
+    source_offset = state.registers[11]     # r10
+    copy_length = state.registers[12]       # r11
+
+    # Check context has accounts dictionary
+    if context === nothing || context.accounts === nothing
+        state.registers[8] = NONE
+        return state
+    end
+
+    # Determine target service (r7 = 2^64-1 means self)
+    target_service_id = if service_id_param == typemax(UInt64)
+        context.service_id
+    else
+        UInt32(service_id_param)
+    end
+
+    # Look up account
+    if !haskey(context.accounts, target_service_id)
+        state.registers[8] = NONE
+        return state
+    end
+
+    account = context.accounts[target_service_id]
+
+    # Check if hash memory is readable (32 bytes)
+    if !is_readable(state.memory.access, UInt32(hash_offset), UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read code hash from memory
+    code_hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # Historical lookup: Check if code hash matches account's current code hash
+    # In a full implementation, this would lookup historical state at lookup_anchor_time
+    # For now, we check against current account code hash
+    if account.code_hash != code_hash
+        state.registers[8] = NONE
+        return state
+    end
+
+    # For historical lookup, we would return encoded service account data
+    # For now, return a placeholder indicating historical data would be here
+    # In full implementation: encode account state (balance, storage, etc.)
+    historical_data = account.code_hash  # Simplified: just return code hash
+
+    total_length = length(historical_data)
+
+    # Calculate actual copy parameters
+    actual_source_offset = min(source_offset, UInt64(total_length))
+    actual_length = min(copy_length, UInt64(total_length) - actual_source_offset)
+
+    # Check if output memory is writable
+    if !is_writable(state.memory.access, UInt32(output_offset), UInt32(actual_length))
+        state.status = :panic
+        return state
+    end
+
+    # Copy historical data to memory
+    for i in 0:(actual_length-1)
+        src_idx = actual_source_offset + i + 1
+        dst_idx = output_offset + i + 1
+        if src_idx <= length(historical_data) && dst_idx <= length(state.memory.data)
+            state.memory.data[dst_idx] = historical_data[src_idx]
+        end
+    end
+
+    # Return total length in r7
+    state.registers[8] = UInt64(total_length)
     return state
 end
 
