@@ -2100,7 +2100,7 @@ function host_call_query(state, context)
 
     # Parse parameters
     hash_offset = UInt32(state.registers[8])  # r7
-    length = state.registers[9]               # r8
+    req_length = state.registers[9]           # r8
 
     # Check memory bounds for hash
     if !is_readable(state.memory.access, hash_offset, UInt32(32))
@@ -2111,10 +2111,10 @@ function host_call_query(state, context)
     # Read hash
     hash = state.memory.data[hash_offset+1:hash_offset+32]
 
-    # Look up request status in self.requests[(hash, length)]
+    # Look up request status in self.requests[(hash, req_length)]
     if !isnothing(context.implications)
         im = context.implications
-        key = (hash, UInt64(length))
+        key = (hash, UInt64(req_length))
 
         if haskey(im.self.requests, key)
             req = im.self.requests[key]
@@ -2176,7 +2176,7 @@ function host_call_solicit(state, context)
 
     # Parse parameters
     hash_offset = UInt32(state.registers[8])  # r7
-    length = state.registers[9]               # r8
+    req_length = state.registers[9]           # r8
 
     # Check memory bounds for hash
     if !is_readable(state.memory.access, hash_offset, UInt32(32))
@@ -2190,7 +2190,7 @@ function host_call_solicit(state, context)
     # Update self.requests
     if !isnothing(context.implications)
         im = context.implications
-        key = (hash, UInt64(length))
+        key = (hash, UInt64(req_length))
 
         if haskey(im.self.requests, key)
             req = im.self.requests[key]
@@ -2246,7 +2246,7 @@ function host_call_forget(state, context)
 
     # Parse parameters
     hash_offset = UInt32(state.registers[8])  # r7
-    length = state.registers[9]               # r8
+    req_length = state.registers[9]           # r8
 
     # Check memory bounds for hash
     if !is_readable(state.memory.access, hash_offset, UInt32(32))
