@@ -22,6 +22,10 @@ using StaticArrays
 # Security-critical: never silently degrade to insecure hash functions
 include("../crypto/Blake2b.jl")
 
+# Import unified accumulate types
+# These types are now centralized in src/types/accumulate.jl
+include("../types/accumulate.jl")
+
 # ===== Host Call IDs =====
 # General functions (available in all contexts)
 const GAS = 0
@@ -68,134 +72,18 @@ const CASH = typemax(UInt64) - UInt64(6)         # Insufficient funds (2^64 - 7)
 const LOW = typemax(UInt64) - UInt64(7)          # Gas limit too low (2^64 - 8)
 const HUH = typemax(UInt64) - UInt64(8)          # Invalid operation/parameter (2^64 - 9)
 
-# ===== Context Types =====
+# ===== Unified Types =====
 #
-# NOTE: These types are also defined in src/types/accumulate.jl for use outside host_calls.jl
-# TODO: Unify these definitions - currently duplicated for module isolation
-# See docs/ACCUMULATE_STATUS.md for details on consolidation plan
-
-"""
-Preimage request state
-Tracks the lifecycle of a preimage request:
-- [] (empty): request created, not yet satisfied
-- [x]: partial - requester paid x gas
-- [x, y]: satisfied pending - paid x gas, finalized at timeslot y
-- [x, y, z]: satisfied available - paid x gas, finalized at y, re-requested at z
-"""
-mutable struct PreimageRequest
-    state::Vector{UInt64}  # 0-3 elements as per spec
-end
-
-"""
-Deferred transfer - balance transfer with memo
-"""
-struct DeferredTransfer
-    source::UInt32
-    dest::UInt32
-    amount::UInt64
-    memo::Vector{UInt8}  # 128 bytes
-    gas::UInt64
-end
-
-"""
-Service account structure
-Full JAM service account with all fields per graypaper
-"""
-mutable struct ServiceAccount
-    code_hash::Vector{UInt8}  # 32 bytes
-    storage::Dict{Vector{UInt8}, Vector{UInt8}}  # key => value
-    preimages::Dict{Vector{UInt8}, Vector{UInt8}}  # hash => preimage data
-    requests::Dict{Tuple{Vector{UInt8}, UInt64}, PreimageRequest}  # (hash, length) => state
-    balance::UInt64
-    min_balance::UInt64
-    min_acc_gas::UInt64
-    min_memo_gas::UInt64
-    octets::UInt64  # total storage bytes
-    items::UInt32   # number of storage items
-    gratis::UInt64  # gratis offset
-    created::UInt32  # timeslot when created
-    last_acc::UInt32  # timeslot of last accumulation
-    parent::UInt32  # parent service ID
-end
-
-"""
-Privileged state - chain-level configuration managed by special services
-"""
-mutable struct PrivilegedState
-    manager::UInt32  # service that can bless
-    assigners::Vector{UInt32}  # per-core: service that assigned this core
-    delegator::UInt32  # service that can designate validators
-    registrar::UInt32  # service that can create privileged services
-    staging_set::Vector{Vector{UInt8}}  # validator staging set (Cvalcount entries)
-    auth_queue::Vector{Vector{Vector{UInt8}}}  # per-core auth queues (Ccorecount x Cauthqueuesize)
-    always_access::Vector{Tuple{UInt32, UInt64}}  # services with permanent access
-end
-
-"""
-Implications context - mutable state tracking all changes during accumulation
-This represents imX (normal exit) and imY (exceptional exit) from graypaper
-"""
-mutable struct ImplicationsContext
-    service_id::UInt32  # current service being executed
-
-    # Service state (imX for normal exit, imY for exceptional)
-    self::ServiceAccount  # current service's account
-
-    # Global state (shared across services in this accumulation)
-    privileged_state::PrivilegedState
-    accounts::Dict{UInt32, ServiceAccount}  # all service accounts
-
-    # Accumulation outputs
-    transfers::Vector{DeferredTransfer}  # deferred transfers (xfers)
-    provisions::Set{Tuple{UInt32, Vector{UInt8}}}  # (service_id, preimage_data)
-    yield_hash::Union{Vector{UInt8}, Nothing}  # result hash (32 bytes or nothing)
-
-    # State management
-    next_free_id::UInt32  # next available service ID
-    current_time::UInt32  # current timeslot
-
-    # Checkpoint support for exceptional exits
-    exceptional_state::Union{ImplicationsContext, Nothing}  # imY - checkpointed state
-end
-
-"""
-Host call context - contains state needed for host call execution
-Includes implications context for accumulate invocations
-"""
-struct HostCallContext
-    # Legacy fields for compatibility
-    service_account::Union{ServiceAccount, Nothing}
-    service_id::UInt32
-    accounts::Union{Dict{UInt32, ServiceAccount}, Nothing}
-
-    # Environment data for fetch host call
-    entropy::Union{Vector{UInt8}, Nothing}  # 32-byte entropy/timeslot hash (n)
-    config::Union{Dict{Symbol, Any}, Nothing}  # JAM configuration constants
-    work_package::Union{Dict{Symbol, Any}, Nothing}  # Work package data (p)
-    recent_blocks::Union{Vector{Vector{UInt8}}, Nothing}  # Recent block hashes (r)
-
-    # Implications context for accumulate invocations (mutable state tracking)
-    implications::Union{ImplicationsContext, Nothing}
-end
-
-# Constructor with defaults for backward compatibility
-function HostCallContext(service_account, service_id, accounts)
-    HostCallContext(service_account, service_id, accounts, nothing, nothing, nothing, nothing, nothing)
-end
-
-# Constructor for accumulate invocations with implications context
-function HostCallContext(implications::ImplicationsContext, entropy, config, work_package, recent_blocks)
-    HostCallContext(
-        implications.self,
-        implications.service_id,
-        implications.accounts,
-        entropy,
-        config,
-        work_package,
-        recent_blocks,
-        implications
-    )
-end
+# All accumulate types now imported from src/types/accumulate.jl:
+# - PreimageRequest: 4-state machine ([], [x], [x,y], [x,y,z])
+# - DeferredTransfer: balance transfer with memo
+# - ServiceAccount: complete 14-field service account
+# - PrivilegedState: chain-level privileged services
+# - ImplicationsContext: mutable state tracking (imX/imY)
+# - HostCallContext: host call execution context
+#
+# These are now centralized and used across the entire codebase.
+# See docs/TYPE_UNIFICATION.md for details.
 
 # ===== Constants =====
 
