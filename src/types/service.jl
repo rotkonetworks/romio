@@ -1,7 +1,19 @@
 # src/types/service.jl
-# service account types
+# DEPRECATED: Use src/types/accumulate.jl instead
+#
+# This file contains an older ServiceAccount definition that is missing fields
+# required for full JAM compliance. The unified definition in accumulate.jl includes:
+# - min_balance (computed from octets/items)
+# - requests (full state machine vs just a set)
+# - octets, items, gratis (storage accounting)
+# - created, parent (metadata for service lifecycle)
+#
+# TODO: Migrate all users of this file to accumulate.jl and remove this file
 
-mutable struct ServiceAccount
+# Include basic types
+include("basic.jl")
+
+mutable struct ServiceAccount_DEPRECATED
     storage::Dict{Blob, Blob}
     preimages::Dict{Hash, Blob}
     preimage_meta::Dict{Tuple{Hash, UInt32}, Vector{TimeSlot}}

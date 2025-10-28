@@ -69,6 +69,10 @@ const LOW = typemax(UInt64) - UInt64(7)          # Gas limit too low (2^64 - 8)
 const HUH = typemax(UInt64) - UInt64(8)          # Invalid operation/parameter (2^64 - 9)
 
 # ===== Context Types =====
+#
+# NOTE: These types are also defined in src/types/accumulate.jl for use outside host_calls.jl
+# TODO: Unify these definitions - currently duplicated for module isolation
+# See docs/ACCUMULATE_STATUS.md for details on consolidation plan
 
 """
 Preimage request state
