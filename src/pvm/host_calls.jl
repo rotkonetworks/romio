@@ -24,6 +24,15 @@ catch
     # Not available in standalone testing - that's OK
 end
 
+# Try to import BLAKE2b for proper hashing
+# If not available, fall back to stub implementation
+const BLAKE2B_AVAILABLE = try
+    include("../crypto/Blake2b.jl")
+    true
+catch
+    false
+end
+
 # Import parent serialization modules (will be available when used from JAM)
 # For now, we'll add fallbacks for standalone testing
 
@@ -275,6 +284,28 @@ function create_implications_context(
 end
 
 # ===== Encoding Helpers =====
+
+"""
+Compute BLAKE2b-256 hash of data
+Uses proper BLAKE2b implementation if available, falls back to stub
+"""
+function blake2b_256(data::Vector{UInt8})::Vector{UInt8}
+    output = zeros(UInt8, 32)
+
+    if BLAKE2B_AVAILABLE
+        # Use proper BLAKE2b implementation
+        Blake2b!(output, 32, UInt8[], 0, data, length(data))
+    else
+        # Fallback stub for standalone testing
+        # Uses Julia's built-in hash - NOT CRYPTOGRAPHICALLY SECURE
+        h = hash(data)
+        for i in 1:min(8, 32)
+            output[i] = UInt8((h >> (8*(i-1))) & 0xFF)
+        end
+    end
+
+    return output
+end
 
 """
 Encode a UInt64 value in little-endian format
@@ -2361,14 +2392,8 @@ function host_call_provide(state, context)
         # Get target account
         target_account = target_service_id == im.service_id ? im.self : im.accounts[target_service_id]
 
-        # Compute hash of data (stub - should use BLAKE2b)
-        # For now, use Julia's built-in hash as placeholder
-        # TODO: Replace with proper BLAKE2b when crypto module is available
-        data_hash = zeros(UInt8, 32)
-        h = hash(data)
-        for i in 1:min(8, 32)
-            data_hash[i] = UInt8((h >> (8*(i-1))) & 0xFF)
-        end
+        # Compute BLAKE2b-256 hash of data
+        data_hash = blake2b_256(data)
 
         # Check if service has request for this preimage in [] state
         key = (data_hash, UInt64(data_length))
