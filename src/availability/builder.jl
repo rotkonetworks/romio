@@ -2,7 +2,7 @@
 
 include("../types/basic.jl")
 include("../types/work.jl")
-include("../types/service.jl")
+include("../types/accumulate.jl")
 include("../crypto/hash.jl")
 include("erasure.jl")
 

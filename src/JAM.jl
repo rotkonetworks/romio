@@ -27,7 +27,7 @@ include("crypto/mmr.jl")
 
 # remaining types
 include("types/validator.jl")
-include("types/service.jl")
+include("types/accumulate.jl")
 include("types/work.jl")
 
 # state
