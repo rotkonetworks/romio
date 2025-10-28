@@ -1389,7 +1389,20 @@ end
     host_call_bless(state, context)
 
 Host call 14: bless
-Bless preimage data for availability.
+Set privileged state (manager, validators, core authorizers, etc.).
+
+Inputs:
+  r7: manager service ID (m)
+  r8: authorizers array offset (a) - 4*C_core_count bytes
+  r9: validator service ID (v)
+  r10: registrar service ID (r)
+  r11: always-access array offset (o) - 12*n bytes
+  r12: always-access count (n)
+
+Returns in r7:
+  - OK (success)
+  - WHO (invalid service ID)
+
 Gas cost: 10
 """
 function host_call_bless(state, context)
@@ -1399,7 +1412,53 @@ function host_call_bless(state, context)
         return state
     end
 
-    # TODO: Implement bless
+    # Get parameters
+    manager_id = state.registers[8]      # r7
+    auth_offset = UInt32(state.registers[9])  # r8
+    validator_id = state.registers[10]   # r9
+    registrar_id = state.registers[11]   # r10
+    access_offset = UInt32(state.registers[12]) # r11
+    access_count = UInt32(state.registers[13])  # r12
+
+    # TODO: Read C_core_count from config
+    core_count = 2  # tiny chainspec
+
+    # Check if authorizers memory is readable (4 bytes per core)
+    if !is_readable(state.memory.access, auth_offset, UInt32(4 * core_count))
+        state.status = :panic
+        return state
+    end
+
+    # Check if always-access memory is readable (12 bytes per entry)
+    if !is_readable(state.memory.access, access_offset, UInt32(12 * access_count))
+        state.status = :panic
+        return state
+    end
+
+    # Read authorizers array
+    # authorizers = Vector{UInt32}(undef, core_count)
+    # for i in 1:core_count
+    #     # Read 4-byte service ID
+    # end
+
+    # Read always-access entries
+    # for i in 1:access_count
+    #     # Read service ID (4 bytes) + gas (8 bytes)
+    # end
+
+    # Validate service IDs are in valid range
+    if manager_id >= 2^32 || validator_id >= 2^32 || registrar_id >= 2^32
+        state.registers[8] = WHO
+        return state
+    end
+
+    # TODO: Update context implications state with:
+    # - manager
+    # - authorizers array
+    # - validator
+    # - registrar
+    # - always-access set
+
     state.registers[8] = OK
     return state
 end
@@ -1408,8 +1467,13 @@ end
     host_call_assign(state, context)
 
 Host call 15: assign
-Assign cores.
+Assign cores and authorization queue.
+Parameters:
+  r7: core index (c)
+  r8: queue offset (o) - 32*Cauthqueuesize bytes
+  r9: assigner service id (a)
 Gas cost: 10
+Returns: OK, CORE, HUH, WHO
 """
 function host_call_assign(state, context)
     state.gas -= 10
@@ -1418,7 +1482,51 @@ function host_call_assign(state, context)
         return state
     end
 
-    # TODO: Implement assign
+    # Parse parameters
+    core_index = state.registers[8]     # r7
+    queue_offset = UInt32(state.registers[9])  # r8
+    assigner_id = state.registers[10]   # r9
+
+    # Constants
+    auth_queue_size = 80  # Cauthqueuesize from graypaper
+
+    # Check memory bounds for auth queue (32 * auth_queue_size bytes)
+    queue_bytes = UInt32(32 * auth_queue_size)
+    if !is_readable(state.memory.access, queue_offset, queue_bytes)
+        state.status = :panic
+        return state
+    end
+
+    # Read authorization queue
+    auth_queue = Vector{Vector{UInt8}}(undef, auth_queue_size)
+    for i in 1:auth_queue_size
+        offset = queue_offset + UInt32((i-1) * 32)
+        auth_queue[i] = state.memory.data[offset+1:offset+32]
+    end
+
+    # Validation checks
+    core_count = 2  # tiny chainspec
+
+    # Check if core index is valid
+    if core_index >= core_count
+        state.registers[8] = CORE
+        return state
+    end
+
+    # Check if caller owns this core (requires full state integration)
+    # TODO: Verify context.service_id == state.assigners[core_index]
+    # For now, stub returns OK
+
+    # Check if assigner_id is valid service id
+    if assigner_id >= 2^32
+        state.registers[8] = WHO
+        return state
+    end
+
+    # TODO: Update privileged state:
+    # - state.auth_queue[core_index] = auth_queue
+    # - state.assigners[core_index] = assigner_id
+
     state.registers[8] = OK
     return state
 end
@@ -1427,8 +1535,11 @@ end
     host_call_designate(state, context)
 
 Host call 16: designate
-Designate validators.
+Designate validator staging set.
+Parameters:
+  r7: offset (o) - 336*Cvalcount bytes
 Gas cost: 10
+Returns: OK, HUH
 """
 function host_call_designate(state, context)
     state.gas -= 10
@@ -1437,7 +1548,34 @@ function host_call_designate(state, context)
         return state
     end
 
-    # TODO: Implement designate
+    # Parse parameters
+    offset = UInt32(state.registers[8])  # r7
+
+    # Constants
+    val_count = 1023  # Cvalcount from graypaper
+    validator_size = 336  # bytes per validator entry
+
+    # Check memory bounds for validator staging set
+    staging_bytes = UInt32(validator_size * val_count)
+    if !is_readable(state.memory.access, offset, staging_bytes)
+        state.status = :panic
+        return state
+    end
+
+    # Read validator staging set
+    staging_set = Vector{Vector{UInt8}}(undef, val_count)
+    for i in 1:val_count
+        entry_offset = offset + UInt32((i-1) * validator_size)
+        staging_set[i] = state.memory.data[entry_offset+1:entry_offset+validator_size]
+    end
+
+    # Check if caller is the delegator (requires full state integration)
+    # TODO: Verify context.service_id == state.delegator
+    # For now, stub returns OK
+
+    # TODO: Update privileged state:
+    # - state.staging_set = staging_set
+
     state.registers[8] = OK
     return state
 end
@@ -1446,7 +1584,9 @@ end
     host_call_checkpoint(state, context)
 
 Host call 17: checkpoint
-Create execution checkpoint.
+Create execution checkpoint for exceptional exit.
+Sets imY' = imX (checkpoint exceptional state to equal current state).
+Returns gas remaining in r7.
 Gas cost: 10
 """
 function host_call_checkpoint(state, context)
@@ -1456,8 +1596,13 @@ function host_call_checkpoint(state, context)
         return state
     end
 
-    # TODO: Implement checkpoint
-    state.registers[8] = OK
+    # Set r7 to remaining gas
+    state.registers[8] = UInt64(max(0, state.gas))
+
+    # TODO: Set imY' = imX (checkpoint exceptional exit state)
+    # This requires full implications context integration
+    # The exceptional state (imY) should be set to current state (imX)
+
     return state
 end
 
@@ -1466,7 +1611,15 @@ end
 
 Host call 18: new
 Create new service account.
+Parameters:
+  r7: code hash offset (o) - 32 bytes
+  r8: code length (l) - must fit in 32 bits
+  r9: min accumulate gas (min_acc_gas)
+  r10: min on-transfer gas (min_memo_gas)
+  r11: gratis flag
+  r12: desired service id (0 for auto-assign)
 Gas cost: 10
+Returns: service_id, HUH, CASH, FULL
 """
 function host_call_new(state, context)
     state.gas -= 10
@@ -1475,8 +1628,74 @@ function host_call_new(state, context)
         return state
     end
 
-    # TODO: Implement new service creation
-    state.registers[8] = OK
+    # Parse parameters
+    hash_offset = UInt32(state.registers[8])   # r7
+    code_length = state.registers[9]           # r8
+    min_acc_gas = state.registers[10]          # r9
+    min_memo_gas = state.registers[11]         # r10
+    gratis = state.registers[12]               # r11
+    desired_id = state.registers[13]           # r12
+
+    # Check if code_length fits in 32 bits
+    if code_length >= 2^32
+        state.status = :panic
+        return state
+    end
+
+    # Check memory bounds for code hash
+    if !is_readable(state.memory.access, hash_offset, UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read code hash
+    code_hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # Check if caller is manager when trying to create privileged service (desired_id != 0)
+    # TODO: Verify context.service_id == state.manager when desired_id != 0
+    # For now, stub check
+    # if desired_id != 0 && context.service_id != manager_id
+    #     state.registers[8] = HUH
+    #     return state
+    # end
+
+    # Check if caller has sufficient balance to create service
+    # TODO: Check if self.balance - min_balance >= self.min_balance
+    # For now, stub returns OK
+
+    # Check if desired_id already exists (when caller is registrar)
+    # TODO: Check if desired_id < Cminpublicindex && desired_id in accounts
+    # For now, stub returns OK
+
+    # Constants
+    min_public_index = 2^16  # Cminpublicindex
+
+    # Assign service id
+    if desired_id < min_public_index && desired_id != 0
+        # Registrar creating privileged service
+        # TODO: Check if id already exists
+        assigned_id = desired_id
+    else
+        # Auto-assign public service id
+        # TODO: Use next_free_id and find next available slot
+        assigned_id = min_public_index  # stub
+    end
+
+    # TODO: Create new service account with:
+    # - code_hash
+    # - empty storage
+    # - empty requests (except for initial (code_length, code_length) -> [])
+    # - balance = min_balance
+    # - min_acc_gas, min_memo_gas
+    # - empty preimages
+    # - created = current_time
+    # - gratis
+    # - last_acc = 0
+    # - parent = context.service_id
+
+    # TODO: Deduct min_balance from caller's balance
+
+    state.registers[8] = UInt64(assigned_id)
     return state
 end
 
@@ -1484,8 +1703,13 @@ end
     host_call_upgrade(state, context)
 
 Host call 19: upgrade
-Upgrade service code.
+Upgrade service code hash and gas parameters.
+Parameters:
+  r7: code hash offset (o) - 32 bytes
+  r8: min accumulate gas (g)
+  r9: min on-transfer gas (m)
 Gas cost: 10
+Returns: OK
 """
 function host_call_upgrade(state, context)
     state.gas -= 10
@@ -1494,7 +1718,25 @@ function host_call_upgrade(state, context)
         return state
     end
 
-    # TODO: Implement service upgrade
+    # Parse parameters
+    hash_offset = UInt32(state.registers[8])  # r7
+    min_acc_gas = state.registers[9]          # r8
+    min_memo_gas = state.registers[10]        # r9
+
+    # Check memory bounds for code hash
+    if !is_readable(state.memory.access, hash_offset, UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read code hash
+    code_hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # TODO: Update self's account:
+    # - self.code_hash = code_hash
+    # - self.min_acc_gas = min_acc_gas
+    # - self.min_memo_gas = min_memo_gas
+
     state.registers[8] = OK
     return state
 end
@@ -1503,17 +1745,64 @@ end
     host_call_transfer(state, context)
 
 Host call 20: transfer
-Transfer balance between accounts.
-Gas cost: 10
+Transfer balance to another service with memo.
+Parameters:
+  r7: destination service id
+  r8: amount to transfer
+  r9: gas limit for transfer (l)
+  r10: memo offset (o) - 128 bytes
+Gas cost: 10 + l (gas limit is consumed)
+Returns: OK, WHO, LOW, CASH
 """
 function host_call_transfer(state, context)
-    state.gas -= 10
+    # Parse parameters first (before charging gas)
+    dest_service_id = state.registers[8]      # r7
+    amount = state.registers[9]                # r8
+    gas_limit = Int64(state.registers[10])     # r9
+    memo_offset = UInt32(state.registers[11])  # r10
+
+    # Gas cost is 10 + gas_limit
+    gas_cost = 10 + gas_limit
+    state.gas -= gas_cost
     if state.gas < 0
         state.status = :oog
         return state
     end
 
-    # TODO: Implement transfer
+    # Constants
+    memo_size = 128  # Cmemosize
+
+    # Check memory bounds for memo
+    if !is_readable(state.memory.access, memo_offset, UInt32(memo_size))
+        state.status = :panic
+        return state
+    end
+
+    # Read memo
+    memo = state.memory.data[memo_offset+1:memo_offset+memo_size]
+
+    # Check if destination exists
+    # TODO: Check if dest_service_id in accounts
+    # For now, stub check
+
+    # Check if gas_limit meets destination's minimum
+    # TODO: Check if gas_limit >= accounts[dest_service_id].min_memo_gas
+    # For now, stub check
+
+    # Check if caller has sufficient balance
+    # TODO: Check if self.balance - amount >= self.min_balance
+    # For now, stub check
+
+    # TODO: Create deferred transfer:
+    # - source = context.service_id
+    # - dest = dest_service_id
+    # - amount = amount
+    # - memo = memo
+    # - gas = gas_limit
+    # Append to xfers list
+
+    # TODO: Deduct amount from caller's balance
+
     state.registers[8] = OK
     return state
 end
@@ -1522,8 +1811,12 @@ end
     host_call_eject(state, context)
 
 Host call 21: eject
-Eject service.
+Eject a service account that is ready for removal.
+Parameters:
+  r7: service id to eject (d)
+  r8: hash offset (o) - 32 bytes
 Gas cost: 10
+Returns: OK, WHO, HUH
 """
 function host_call_eject(state, context)
     state.gas -= 10
@@ -1532,7 +1825,38 @@ function host_call_eject(state, context)
         return state
     end
 
-    # TODO: Implement eject
+    # Parse parameters
+    service_to_eject = state.registers[8]      # r7
+    hash_offset = UInt32(state.registers[9])   # r8
+
+    # Check memory bounds for hash
+    if !is_readable(state.memory.access, hash_offset, UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read hash
+    hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # Check if trying to eject self (not allowed)
+    # TODO: Check if service_to_eject == context.service_id
+
+    # Check if service exists
+    # TODO: Check if service_to_eject in accounts
+    # For now, stub check
+
+    # Check if service's code_hash matches caller's service_id (parent check)
+    # TODO: Check if accounts[service_to_eject].code_hash == encode[32](context.service_id)
+
+    # Check if service has exactly 2 items and the request is ready for ejection
+    # TODO: Check if accounts[service_to_eject].items == 2
+    # TODO: Check if (hash, length) in accounts[service_to_eject].requests
+    # TODO: Check if request was finalized before expunge period
+
+    # TODO: Remove service account and transfer balance to caller
+    # - Remove accounts[service_to_eject]
+    # - Add balance to self.balance
+
     state.registers[8] = OK
     return state
 end
@@ -1541,8 +1865,17 @@ end
     host_call_query(state, context)
 
 Host call 22: query
-Query service.
+Query preimage request status.
+Parameters:
+  r7: hash offset (o) - 32 bytes
+  r8: length (z)
 Gas cost: 10
+Returns in r7/r8: encoded status
+  - r7=NONE, r8=0: request doesn't exist
+  - r7=0, r8=0: request exists but not satisfied ([])
+  - r7=1+2^32*x, r8=0: request partially satisfied ([x])
+  - r7=2+2^32*x, r8=y: request fully satisfied, pending ([x, y])
+  - r7=3+2^32*x, r8=y+2^32*z: request fully satisfied, available ([x, y, z])
 """
 function host_call_query(state, context)
     state.gas -= 10
@@ -1551,8 +1884,30 @@ function host_call_query(state, context)
         return state
     end
 
-    # TODO: Implement query
-    state.registers[8] = OK
+    # Parse parameters
+    hash_offset = UInt32(state.registers[8])  # r7
+    length = state.registers[9]               # r8
+
+    # Check memory bounds for hash
+    if !is_readable(state.memory.access, hash_offset, UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read hash
+    hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # TODO: Look up request status in self.requests[(hash, length)]
+    # Request states:
+    # - Not found: return NONE, 0
+    # - []: return 0, 0
+    # - [x]: return 1 + 2^32*x, 0
+    # - [x, y]: return 2 + 2^32*x, y
+    # - [x, y, z]: return 3 + 2^32*x, y + 2^32*z
+
+    # For now, stub returns request doesn't exist
+    state.registers[8] = NONE
+    state.registers[9] = 0
     return state
 end
 
@@ -1560,8 +1915,12 @@ end
     host_call_solicit(state, context)
 
 Host call 23: solicit
-Solicit service.
+Solicit preimage data by creating or updating request.
+Parameters:
+  r7: hash offset (o) - 32 bytes
+  r8: length (z)
 Gas cost: 10
+Returns: OK, HUH, FULL
 """
 function host_call_solicit(state, context)
     state.gas -= 10
@@ -1570,7 +1929,27 @@ function host_call_solicit(state, context)
         return state
     end
 
-    # TODO: Implement solicit
+    # Parse parameters
+    hash_offset = UInt32(state.registers[8])  # r7
+    length = state.registers[9]               # r8
+
+    # Check memory bounds for hash
+    if !is_readable(state.memory.access, hash_offset, UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read hash
+    hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # TODO: Update self.requests:
+    # - If (hash, length) not in requests: create new entry with []
+    # - If requests[(hash, length)] = [x, y]: append current_time to get [x, y, time]
+    # - Otherwise: return HUH (invalid state transition)
+
+    # TODO: Check if self.balance >= self.min_balance after request creation
+    # If not, return FULL
+
     state.registers[8] = OK
     return state
 end
@@ -1579,8 +1958,12 @@ end
     host_call_forget(state, context)
 
 Host call 24: forget
-Forget preimage.
+Forget preimage data by removing or updating request.
+Parameters:
+  r7: hash offset (o) - 32 bytes
+  r8: length (z)
 Gas cost: 10
+Returns: OK, HUH
 """
 function host_call_forget(state, context)
     state.gas -= 10
@@ -1589,7 +1972,28 @@ function host_call_forget(state, context)
         return state
     end
 
-    # TODO: Implement forget
+    # Parse parameters
+    hash_offset = UInt32(state.registers[8])  # r7
+    length = state.registers[9]               # r8
+
+    # Check memory bounds for hash
+    if !is_readable(state.memory.access, hash_offset, UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read hash
+    hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # TODO: Update self.requests based on current state:
+    # - If requests[(hash, z)] = [] or [x, y] where y < time - Cexpungeperiod:
+    #   Remove from requests and preimages
+    # - If requests[(hash, z)] = [x]:
+    #   Update to [x, current_time]
+    # - If requests[(hash, z)] = [x, y, w] where y < time - Cexpungeperiod:
+    #   Update to [w, current_time]
+    # - Otherwise: return HUH (invalid state)
+
     state.registers[8] = OK
     return state
 end
@@ -1598,8 +2002,11 @@ end
     host_call_yield(state, context)
 
 Host call 25: yield
-Yield work result.
+Yield accumulation result hash.
+Parameters:
+  r7: hash offset (o) - 32 bytes
 Gas cost: 10
+Returns: OK
 """
 function host_call_yield(state, context)
     state.gas -= 10
@@ -1608,7 +2015,21 @@ function host_call_yield(state, context)
         return state
     end
 
-    # TODO: Implement yield
+    # Parse parameters
+    hash_offset = UInt32(state.registers[8])  # r7
+
+    # Check memory bounds for hash
+    if !is_readable(state.memory.access, hash_offset, UInt32(32))
+        state.status = :panic
+        return state
+    end
+
+    # Read hash
+    hash = state.memory.data[hash_offset+1:hash_offset+32]
+
+    # TODO: Set imX.yield = hash
+    # This is the accumulation result that will be included in work results
+
     state.registers[8] = OK
     return state
 end
@@ -1617,8 +2038,13 @@ end
     host_call_provide(state, context)
 
 Host call 26: provide
-Provide data for next accumulation.
+Provide preimage data for a service.
+Parameters:
+  r7: service id (s) - use 2^64-1 for self
+  r8: data offset (o)
+  r9: data length (z)
 Gas cost: 10
+Returns: OK, WHO, HUH
 """
 function host_call_provide(state, context)
     state.gas -= 10
@@ -1627,7 +2053,47 @@ function host_call_provide(state, context)
         return state
     end
 
-    # TODO: Implement provide
+    # Parse parameters
+    service_id_param = state.registers[8]      # r7
+    data_offset = UInt32(state.registers[9])   # r8
+    data_length = UInt32(state.registers[10])  # r9
+
+    # Determine target service (2^64-1 means self)
+    target_service_id = if service_id_param == typemax(UInt64)
+        context.service_id
+    else
+        UInt32(service_id_param)
+    end
+
+    # Check memory bounds for data
+    if !is_readable(state.memory.access, data_offset, data_length)
+        state.status = :panic
+        return state
+    end
+
+    # Read data
+    data = state.memory.data[data_offset+1:data_offset+data_length]
+
+    # Compute hash of data
+    # TODO: Use proper BLAKE2b hash
+    data_hash = zeros(UInt8, 32)  # stub
+
+    # Check if service exists
+    # TODO: Check if target_service_id in accounts
+    # If not, return WHO
+
+    # Check if service has request for this preimage
+    # TODO: Check if (blake(data), data_length) in accounts[target_service_id].requests
+    # TODO: Check if requests[(hash, length)] == []
+    # If not [], return HUH (already provided or invalid state)
+
+    # Check if provision already exists
+    # TODO: Check if (target_service_id, data) in provisions
+    # If exists, return HUH
+
+    # TODO: Add to provisions set
+    # provisions = provisions ∪ {(target_service_id, data)}
+
     state.registers[8] = OK
     return state
 end
