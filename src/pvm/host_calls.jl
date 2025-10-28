@@ -16,25 +16,11 @@ Each host call has specific gas costs and can return various result codes.
 
 module HostCalls
 
-# Try to use StaticArrays if available, but don't require it
-# (StaticArrays is only needed if using SVector types from parent modules)
-try
-    using StaticArrays
-catch
-    # Not available in standalone testing - that's OK
-end
+using StaticArrays
 
-# Try to import BLAKE2b for proper hashing
-# If not available, fall back to stub implementation
-const BLAKE2B_AVAILABLE = try
-    include("../crypto/Blake2b.jl")
-    true
-catch
-    false
-end
-
-# Import parent serialization modules (will be available when used from JAM)
-# For now, we'll add fallbacks for standalone testing
+# Import BLAKE2b - REQUIRED, no fallback
+# Security-critical: never silently degrade to insecure hash functions
+include("../crypto/Blake2b.jl")
 
 # ===== Host Call IDs =====
 # General functions (available in all contexts)
@@ -287,23 +273,11 @@ end
 
 """
 Compute BLAKE2b-256 hash of data
-Uses proper BLAKE2b implementation if available, falls back to stub
+Uses RFC 7693 BLAKE2b implementation - REQUIRED for security
 """
 function blake2b_256(data::Vector{UInt8})::Vector{UInt8}
     output = zeros(UInt8, 32)
-
-    if BLAKE2B_AVAILABLE
-        # Use proper BLAKE2b implementation
-        Blake2b!(output, 32, UInt8[], 0, data, length(data))
-    else
-        # Fallback stub for standalone testing
-        # Uses Julia's built-in hash - NOT CRYPTOGRAPHICALLY SECURE
-        h = hash(data)
-        for i in 1:min(8, 32)
-            output[i] = UInt8((h >> (8*(i-1))) & 0xFF)
-        end
-    end
-
+    Blake2b!(output, 32, UInt8[], 0, data, length(data))
     return output
 end
 
