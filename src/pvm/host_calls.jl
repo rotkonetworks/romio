@@ -1771,12 +1771,21 @@ function host_call_designate(state, context)
         staging_set[i] = state.memory.data[entry_offset+1:entry_offset+validator_size]
     end
 
-    # Check if caller is the delegator (requires full state integration)
-    # TODO: Verify context.service_id == state.delegator
-    # For now, stub returns OK
+    # Get implications context
+    if isnothing(context.implications)
+        state.registers[8] = HUH
+        return state
+    end
+    im = context.implications
 
-    # TODO: Update privileged state:
-    # - state.staging_set = staging_set
+    # Check if caller is the delegator
+    if context.service_id != im.privileged_state.delegator
+        state.registers[8] = HUH
+        return state
+    end
+
+    # Update privileged state staging_set
+    im.privileged_state.staging_set = staging_set
 
     state.registers[8] = OK
     return state
@@ -1870,49 +1879,83 @@ function host_call_new(state, context)
     # Read code hash
     code_hash = state.memory.data[hash_offset+1:hash_offset+32]
 
-    # Check if caller is manager when trying to create privileged service (desired_id != 0)
-    # TODO: Verify context.service_id == state.manager when desired_id != 0
-    # For now, stub check
-    # if desired_id != 0 && context.service_id != manager_id
-    #     state.registers[8] = HUH
-    #     return state
-    # end
-
-    # Check if caller has sufficient balance to create service
-    # TODO: Check if self.balance - min_balance >= self.min_balance
-    # For now, stub returns OK
-
-    # Check if desired_id already exists (when caller is registrar)
-    # TODO: Check if desired_id < Cminpublicindex && desired_id in accounts
-    # For now, stub returns OK
-
     # Constants
-    min_public_index = 2^16  # Cminpublicindex
+    min_public_index = UInt32(2^16)  # Cminpublicindex
+    min_balance_constant = UInt64(10^15)  # Graypaper Cminbalance
 
-    # Assign service id
-    if desired_id < min_public_index && desired_id != 0
-        # Registrar creating privileged service
-        # TODO: Check if id already exists
-        assigned_id = desired_id
-    else
-        # Auto-assign public service id
-        # TODO: Use next_free_id and find next available slot
-        assigned_id = min_public_index  # stub
+    # Get implications context
+    if isnothing(context.implications)
+        state.registers[8] = HUH
+        return state
+    end
+    im = context.implications
+
+    # Check if caller is registrar when trying to create privileged service (desired_id != 0)
+    if desired_id != 0 && desired_id < min_public_index
+        if context.service_id != im.privileged_state.registrar
+            state.registers[8] = HUH
+            return state
+        end
     end
 
-    # TODO: Create new service account with:
-    # - code_hash
-    # - empty storage
-    # - empty requests (except for initial (code_length, code_length) -> [])
-    # - balance = min_balance
-    # - min_acc_gas, min_memo_gas
-    # - empty preimages
-    # - created = current_time
-    # - gratis
-    # - last_acc = 0
-    # - parent = context.service_id
+    # Check if caller has sufficient balance to create service
+    if im.self.balance < min_balance_constant + im.self.min_balance
+        state.registers[8] = FULL
+        return state
+    end
 
-    # TODO: Deduct min_balance from caller's balance
+    # Assign service id
+    assigned_id = if desired_id != 0 && desired_id < min_public_index
+        # Registrar creating privileged service
+        # Check if id already exists
+        if haskey(im.accounts, UInt32(desired_id))
+            state.registers[8] = HUH
+            return state
+        end
+        UInt32(desired_id)
+    else
+        # Auto-assign public service id from next_free_id
+        next_id = im.next_free_id
+        # Find next available slot
+        while haskey(im.accounts, next_id)
+            next_id += UInt32(1)
+            if next_id < min_public_index
+                next_id = min_public_index
+            end
+        end
+        im.next_free_id = next_id + UInt32(1)
+        next_id
+    end
+
+    # Create new service account
+    new_account = ServiceAccount(
+        copy(code_hash),                                    # code_hash
+        Dict{Vector{UInt8}, Vector{UInt8}}(),              # storage: empty
+        Dict{Vector{UInt8}, Vector{UInt8}}(),              # preimages: empty
+        Dict{Tuple{Vector{UInt8}, UInt64}, PreimageRequest}(),  # requests: empty initially
+        min_balance_constant,                               # balance
+        min_balance_constant,                               # min_balance
+        UInt64(min_acc_gas),                               # min_acc_gas
+        UInt64(min_memo_gas),                              # min_memo_gas
+        UInt64(0),                                         # octets
+        UInt32(0),                                         # items
+        UInt64(gratis),                                    # gratis
+        im.current_time,                                   # created
+        UInt32(0),                                         # last_acc
+        context.service_id                                 # parent
+    )
+
+    # Add initial preimage request for code: (code_hash, code_length) -> []
+    if code_length > 0
+        new_account.requests[(copy(code_hash), UInt64(code_length))] = PreimageRequest(Vector{UInt64}())
+        new_account.items += UInt32(1)
+    end
+
+    # Add to accounts
+    im.accounts[assigned_id] = new_account
+
+    # Deduct min_balance from caller's balance
+    im.self.balance -= min_balance_constant
 
     state.registers[8] = UInt64(assigned_id)
     return state
@@ -1951,10 +1994,13 @@ function host_call_upgrade(state, context)
     # Read code hash
     code_hash = state.memory.data[hash_offset+1:hash_offset+32]
 
-    # TODO: Update self's account:
-    # - self.code_hash = code_hash
-    # - self.min_acc_gas = min_acc_gas
-    # - self.min_memo_gas = min_memo_gas
+    # Update self's account in implications context
+    if !isnothing(context.implications)
+        im = context.implications
+        im.self.code_hash = copy(code_hash)
+        im.self.min_acc_gas = UInt64(min_acc_gas)
+        im.self.min_memo_gas = UInt64(min_memo_gas)
+    end
 
     state.registers[8] = OK
     return state
@@ -2000,27 +2046,57 @@ function host_call_transfer(state, context)
     # Read memo
     memo = state.memory.data[memo_offset+1:memo_offset+memo_size]
 
-    # Check if destination exists
-    # TODO: Check if dest_service_id in accounts
-    # For now, stub check
+    # Get implications context
+    if isnothing(context.implications)
+        state.registers[8] = HUH
+        return state
+    end
+    im = context.implications
+
+    # Check if destination service id is valid (< 2^32)
+    if dest_service_id >= 2^32
+        state.registers[8] = WHO
+        return state
+    end
+
+    dest_id = UInt32(dest_service_id)
+
+    # Check if destination exists (either in accounts or is self)
+    dest_account = if dest_id == context.service_id
+        im.self
+    elseif haskey(im.accounts, dest_id)
+        im.accounts[dest_id]
+    else
+        state.registers[8] = WHO
+        return state
+    end
 
     # Check if gas_limit meets destination's minimum
-    # TODO: Check if gas_limit >= accounts[dest_service_id].min_memo_gas
-    # For now, stub check
+    if UInt64(gas_limit) < dest_account.min_memo_gas
+        state.registers[8] = LOW
+        return state
+    end
 
-    # Check if caller has sufficient balance
-    # TODO: Check if self.balance - amount >= self.min_balance
-    # For now, stub check
+    # Check if caller has sufficient balance after transfer
+    if im.self.balance < amount + im.self.min_balance
+        state.registers[8] = CASH
+        return state
+    end
 
-    # TODO: Create deferred transfer:
-    # - source = context.service_id
-    # - dest = dest_service_id
-    # - amount = amount
-    # - memo = memo
-    # - gas = gas_limit
-    # Append to xfers list
+    # Create deferred transfer
+    transfer = DeferredTransfer(
+        context.service_id,      # source
+        dest_id,                 # dest
+        UInt64(amount),          # amount
+        copy(memo),              # memo
+        UInt64(gas_limit)        # gas
+    )
 
-    # TODO: Deduct amount from caller's balance
+    # Append to transfers list
+    push!(im.transfers, transfer)
+
+    # Deduct amount from caller's balance
+    im.self.balance -= UInt64(amount)
 
     state.registers[8] = OK
     return state
@@ -2057,24 +2133,88 @@ function host_call_eject(state, context)
     # Read hash
     hash = state.memory.data[hash_offset+1:hash_offset+32]
 
+    # Get implications context
+    if isnothing(context.implications)
+        state.registers[8] = HUH
+        return state
+    end
+    im = context.implications
+
+    # Check if service_to_eject is valid (< 2^32)
+    if service_to_eject >= 2^32
+        state.registers[8] = WHO
+        return state
+    end
+
+    eject_id = UInt32(service_to_eject)
+
     # Check if trying to eject self (not allowed)
-    # TODO: Check if service_to_eject == context.service_id
+    if eject_id == context.service_id
+        state.registers[8] = HUH
+        return state
+    end
 
     # Check if service exists
-    # TODO: Check if service_to_eject in accounts
-    # For now, stub check
+    if !haskey(im.accounts, eject_id)
+        state.registers[8] = WHO
+        return state
+    end
 
-    # Check if service's code_hash matches caller's service_id (parent check)
-    # TODO: Check if accounts[service_to_eject].code_hash == encode[32](context.service_id)
+    target_account = im.accounts[eject_id]
 
-    # Check if service has exactly 2 items and the request is ready for ejection
-    # TODO: Check if accounts[service_to_eject].items == 2
-    # TODO: Check if (hash, length) in accounts[service_to_eject].requests
-    # TODO: Check if request was finalized before expunge period
+    # Check if service's parent matches caller (encoded as parent field)
+    if target_account.parent != context.service_id
+        state.registers[8] = HUH
+        return state
+    end
 
-    # TODO: Remove service account and transfer balance to caller
-    # - Remove accounts[service_to_eject]
-    # - Add balance to self.balance
+    # Check if service has exactly 2 items (code request + one other)
+    if target_account.items != 2
+        state.registers[8] = HUH
+        return state
+    end
+
+    # Find the non-code request and verify it's expired
+    # Constants
+    expunge_period = UInt32(19200)  # Cexpungeperiod from graypaper
+
+    found_valid_request = false
+    for ((req_hash, req_length), req) in target_account.requests
+        # Skip code request (hash matches code_hash)
+        if req_hash == target_account.code_hash
+            continue
+        end
+
+        # Check if this is the request being ejected
+        if req_hash == hash
+            # Must be in [x, y, z] state where y < current_time - expunge_period
+            if length(req.state) == 3
+                y = UInt32(req.state[2])
+                # Safe subtraction - check if expunge period would underflow
+                expunge_threshold = if im.current_time >= expunge_period
+                    im.current_time - expunge_period
+                else
+                    UInt32(0)
+                end
+                if y < expunge_threshold
+                    found_valid_request = true
+                    break
+                end
+            end
+        end
+    end
+
+    if !found_valid_request
+        state.registers[8] = HUH
+        return state
+    end
+
+    # Remove service account and transfer balance to caller
+    removed_balance = target_account.balance
+    delete!(im.accounts, eject_id)
+
+    # Add balance to caller's balance
+    im.self.balance += removed_balance
 
     state.registers[8] = OK
     return state
@@ -2262,14 +2402,81 @@ function host_call_forget(state, context)
     # Read hash
     hash = state.memory.data[hash_offset+1:hash_offset+32]
 
-    # TODO: Update self.requests based on current state:
-    # - If requests[(hash, z)] = [] or [x, y] where y < time - Cexpungeperiod:
-    #   Remove from requests and preimages
-    # - If requests[(hash, z)] = [x]:
-    #   Update to [x, current_time]
-    # - If requests[(hash, z)] = [x, y, w] where y < time - Cexpungeperiod:
-    #   Update to [w, current_time]
-    # - Otherwise: return HUH (invalid state)
+    # Get implications context
+    if isnothing(context.implications)
+        state.registers[8] = HUH
+        return state
+    end
+    im = context.implications
+
+    # Constants
+    expunge_period = UInt32(19200)  # Cexpungeperiod from graypaper
+
+    # Look up request
+    key = (hash, UInt64(req_length))
+    if !haskey(im.self.requests, key)
+        state.registers[8] = HUH
+        return state
+    end
+
+    req = im.self.requests[key]
+    state_vec = req.state
+
+    # Update based on current state:
+    if length(state_vec) == 0
+        # [] state - remove request and preimage
+        delete!(im.self.requests, key)
+        if haskey(im.self.preimages, hash)
+            delete!(im.self.preimages, hash)
+        end
+        im.self.items = max(UInt32(0), im.self.items - UInt32(1))
+
+    elseif length(state_vec) == 1
+        # [x] state - update to [x, current_time]
+        push!(req.state, UInt64(im.current_time))
+
+    elseif length(state_vec) == 2
+        # [x, y] state - check if expired
+        y = UInt32(state_vec[2])
+        expunge_threshold = if im.current_time >= expunge_period
+            im.current_time - expunge_period
+        else
+            UInt32(0)
+        end
+        if y < expunge_threshold
+            # Remove request and preimage
+            delete!(im.self.requests, key)
+            if haskey(im.self.preimages, hash)
+                delete!(im.self.preimages, hash)
+            end
+            im.self.items = max(UInt32(0), im.self.items - UInt32(1))
+        else
+            state.registers[8] = HUH
+            return state
+        end
+
+    elseif length(state_vec) == 3
+        # [x, y, w] state - check if y expired
+        y = UInt32(state_vec[2])
+        w = state_vec[3]
+        expunge_threshold = if im.current_time >= expunge_period
+            im.current_time - expunge_period
+        else
+            UInt32(0)
+        end
+        if y < expunge_threshold
+            # Update to [w, current_time]
+            req.state = [w, UInt64(im.current_time)]
+        else
+            state.registers[8] = HUH
+            return state
+        end
+
+    else
+        # Invalid state
+        state.registers[8] = HUH
+        return state
+    end
 
     state.registers[8] = OK
     return state
