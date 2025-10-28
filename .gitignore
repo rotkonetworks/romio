@@ -2,3 +2,11 @@ jamtestvectors/
 jam-test-vectors/
 polkajam-nightly-*
 text/
+
+# Development test files
+examples/
+src/pvm/debug_info.jl
+src/pvm/test_export.jl
+src/pvm/test_export_simple.jl
+src/pvm/test_export_working.jl
+src/pvm/test_host_calls_debug.jl
