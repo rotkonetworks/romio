@@ -76,12 +76,37 @@ const HUH = typemax(UInt64) - UInt64(8)          # Invalid operation/parameter (
 # ===== Context Types =====
 
 """
-Service account structure (simplified for host calls)
+Preimage request state
+Tracks the lifecycle of a preimage request:
+- [] (empty): request created, not yet satisfied
+- [x]: partial - requester paid x gas
+- [x, y]: satisfied pending - paid x gas, finalized at timeslot y
+- [x, y, z]: satisfied available - paid x gas, finalized at y, re-requested at z
+"""
+mutable struct PreimageRequest
+    state::Vector{UInt64}  # 0-3 elements as per spec
+end
+
+"""
+Deferred transfer - balance transfer with memo
+"""
+struct DeferredTransfer
+    source::UInt32
+    dest::UInt32
+    amount::UInt64
+    memo::Vector{UInt8}  # 128 bytes
+    gas::UInt64
+end
+
+"""
+Service account structure
+Full JAM service account with all fields per graypaper
 """
 mutable struct ServiceAccount
+    code_hash::Vector{UInt8}  # 32 bytes
     storage::Dict{Vector{UInt8}, Vector{UInt8}}  # key => value
     preimages::Dict{Vector{UInt8}, Vector{UInt8}}  # hash => preimage data
-    code_hash::Vector{UInt8}  # 32 bytes
+    requests::Dict{Tuple{Vector{UInt8}, UInt64}, PreimageRequest}  # (hash, length) => state
     balance::UInt64
     min_balance::UInt64
     min_acc_gas::UInt64
@@ -95,24 +120,158 @@ mutable struct ServiceAccount
 end
 
 """
+Privileged state - chain-level configuration managed by special services
+"""
+mutable struct PrivilegedState
+    manager::UInt32  # service that can bless
+    assigners::Vector{UInt32}  # per-core: service that assigned this core
+    delegator::UInt32  # service that can designate validators
+    registrar::UInt32  # service that can create privileged services
+    staging_set::Vector{Vector{UInt8}}  # validator staging set (Cvalcount entries)
+    auth_queue::Vector{Vector{Vector{UInt8}}}  # per-core auth queues (Ccorecount x Cauthqueuesize)
+    always_access::Vector{Tuple{UInt32, UInt64}}  # services with permanent access
+end
+
+"""
+Implications context - mutable state tracking all changes during accumulation
+This represents imX (normal exit) and imY (exceptional exit) from graypaper
+"""
+mutable struct ImplicationsContext
+    service_id::UInt32  # current service being executed
+
+    # Service state (imX for normal exit, imY for exceptional)
+    self::ServiceAccount  # current service's account
+
+    # Global state (shared across services in this accumulation)
+    privileged_state::PrivilegedState
+    accounts::Dict{UInt32, ServiceAccount}  # all service accounts
+
+    # Accumulation outputs
+    transfers::Vector{DeferredTransfer}  # deferred transfers (xfers)
+    provisions::Set{Tuple{UInt32, Vector{UInt8}}}  # (service_id, preimage_data)
+    yield_hash::Union{Vector{UInt8}, Nothing}  # result hash (32 bytes or nothing)
+
+    # State management
+    next_free_id::UInt32  # next available service ID
+    current_time::UInt32  # current timeslot
+
+    # Checkpoint support for exceptional exits
+    exceptional_state::Union{ImplicationsContext, Nothing}  # imY - checkpointed state
+end
+
+"""
 Host call context - contains state needed for host call execution
-For now, this is a simplified version. Will be expanded as needed.
+Includes implications context for accumulate invocations
 """
 struct HostCallContext
+    # Legacy fields for compatibility
     service_account::Union{ServiceAccount, Nothing}
     service_id::UInt32
-    accounts::Union{Dict{UInt32, ServiceAccount}, Nothing}  # all service accounts (for read/info calls)
+    accounts::Union{Dict{UInt32, ServiceAccount}, Nothing}
 
     # Environment data for fetch host call
     entropy::Union{Vector{UInt8}, Nothing}  # 32-byte entropy/timeslot hash (n)
     config::Union{Dict{Symbol, Any}, Nothing}  # JAM configuration constants
     work_package::Union{Dict{Symbol, Any}, Nothing}  # Work package data (p)
     recent_blocks::Union{Vector{Vector{UInt8}}, Nothing}  # Recent block hashes (r)
+
+    # Implications context for accumulate invocations (mutable state tracking)
+    implications::Union{ImplicationsContext, Nothing}
 end
 
 # Constructor with defaults for backward compatibility
 function HostCallContext(service_account, service_id, accounts)
-    HostCallContext(service_account, service_id, accounts, nothing, nothing, nothing, nothing)
+    HostCallContext(service_account, service_id, accounts, nothing, nothing, nothing, nothing, nothing)
+end
+
+# Constructor for accumulate invocations with implications context
+function HostCallContext(implications::ImplicationsContext, entropy, config, work_package, recent_blocks)
+    HostCallContext(
+        implications.self,
+        implications.service_id,
+        implications.accounts,
+        entropy,
+        config,
+        work_package,
+        recent_blocks,
+        implications
+    )
+end
+
+# ===== Constants =====
+
+const Cexpungeperiod = 19200  # timeslots after which unreferenced preimages can be expunged
+const Cauthqueuesize = 80     # authorization queue size
+const Cvalcount = 1023        # validator count
+const Cmemosize = 128         # transfer memo size (bytes)
+const Cminpublicindex = 2^16  # minimum public service index
+const Ccorecount = 2          # tiny chainspec (will be 341 in production)
+
+# ===== Helper Functions =====
+
+"""
+Create a minimal service account for testing
+"""
+function create_service_account(
+    code_hash::Vector{UInt8},
+    balance::UInt64 = 0,
+    min_balance::UInt64 = 0
+)::ServiceAccount
+    return ServiceAccount(
+        code_hash,
+        Dict{Vector{UInt8}, Vector{UInt8}}(),  # storage
+        Dict{Vector{UInt8}, Vector{UInt8}}(),  # preimages
+        Dict{Tuple{Vector{UInt8}, UInt64}, PreimageRequest}(),  # requests
+        balance,
+        min_balance,
+        0,  # min_acc_gas
+        0,  # min_memo_gas
+        0,  # octets
+        0,  # items
+        0,  # gratis
+        0,  # created
+        0,  # last_acc
+        0   # parent
+    )
+end
+
+"""
+Create default privileged state for testing
+"""
+function create_privileged_state()::PrivilegedState
+    return PrivilegedState(
+        0,  # manager
+        fill(UInt32(0), Ccorecount),  # assigners
+        0,  # delegator
+        0,  # registrar
+        Vector{Vector{UInt8}}(),  # staging_set
+        [Vector{Vector{UInt8}}() for _ in 1:Ccorecount],  # auth_queue
+        Vector{Tuple{UInt32, UInt64}}()  # always_access
+    )
+end
+
+"""
+Create implications context for testing
+"""
+function create_implications_context(
+    service_id::UInt32,
+    service_account::ServiceAccount,
+    accounts::Dict{UInt32, ServiceAccount},
+    privileged_state::PrivilegedState,
+    current_time::UInt32 = 0
+)::ImplicationsContext
+    return ImplicationsContext(
+        service_id,
+        service_account,
+        privileged_state,
+        accounts,
+        Vector{DeferredTransfer}(),  # transfers
+        Set{Tuple{UInt32, Vector{UInt8}}}(),  # provisions
+        nothing,  # yield_hash
+        Cminpublicindex,  # next_free_id
+        current_time,  # current_time
+        nothing  # exceptional_state
+    )
 end
 
 # ===== Encoding Helpers =====
@@ -1420,8 +1579,7 @@ function host_call_bless(state, context)
     access_offset = UInt32(state.registers[12]) # r11
     access_count = UInt32(state.registers[13])  # r12
 
-    # TODO: Read C_core_count from config
-    core_count = 2  # tiny chainspec
+    core_count = Ccorecount
 
     # Check if authorizers memory is readable (4 bytes per core)
     if !is_readable(state.memory.access, auth_offset, UInt32(4 * core_count))
@@ -1435,29 +1593,56 @@ function host_call_bless(state, context)
         return state
     end
 
-    # Read authorizers array
-    # authorizers = Vector{UInt32}(undef, core_count)
-    # for i in 1:core_count
-    #     # Read 4-byte service ID
-    # end
-
-    # Read always-access entries
-    # for i in 1:access_count
-    #     # Read service ID (4 bytes) + gas (8 bytes)
-    # end
-
-    # Validate service IDs are in valid range
+    # Validate service IDs are in valid range (must be < 2^32)
     if manager_id >= 2^32 || validator_id >= 2^32 || registrar_id >= 2^32
         state.registers[8] = WHO
         return state
     end
 
-    # TODO: Update context implications state with:
-    # - manager
-    # - authorizers array
-    # - validator
-    # - registrar
-    # - always-access set
+    # Read authorizers array (one per core)
+    authorizers = Vector{UInt32}(undef, core_count)
+    for i in 1:core_count
+        offset = auth_offset + UInt32((i-1) * 4)
+        bytes = state.memory.data[offset+1:offset+4]
+        auth_id = UInt32(bytes[1]) | (UInt32(bytes[2]) << 8) | (UInt32(bytes[3]) << 16) | (UInt32(bytes[4]) << 24)
+
+        # Validate authorizer ID
+        if auth_id >= 2^32
+            state.registers[8] = WHO
+            return state
+        end
+        authorizers[i] = auth_id
+    end
+
+    # Read always-access entries (service_id: 4 bytes, gas: 8 bytes)
+    always_access = Vector{Tuple{UInt32, UInt64}}(undef, access_count)
+    for i in 1:access_count
+        offset = access_offset + UInt32((i-1) * 12)
+
+        # Read service ID (4 bytes)
+        id_bytes = state.memory.data[offset+1:offset+4]
+        service_id = UInt32(id_bytes[1]) | (UInt32(id_bytes[2]) << 8) |
+                     (UInt32(id_bytes[3]) << 16) | (UInt32(id_bytes[4]) << 24)
+
+        # Read gas (8 bytes)
+        gas_bytes = state.memory.data[offset+5:offset+12]
+        gas = UInt64(0)
+        for j in 1:8
+            gas |= UInt64(gas_bytes[j]) << (8 * (j-1))
+        end
+
+        always_access[i] = (service_id, gas)
+    end
+
+    # Update privileged state if we have implications context
+    if !isnothing(context.implications)
+        im = context.implications
+        im.privileged_state.manager = UInt32(manager_id)
+        im.privileged_state.assigners = authorizers
+        im.privileged_state.delegator = UInt32(validator_id)
+        im.privileged_state.registrar = UInt32(registrar_id)
+        im.privileged_state.always_access = always_access
+    end
 
     state.registers[8] = OK
     return state
@@ -1487,45 +1672,57 @@ function host_call_assign(state, context)
     queue_offset = UInt32(state.registers[9])  # r8
     assigner_id = state.registers[10]   # r9
 
-    # Constants
-    auth_queue_size = 80  # Cauthqueuesize from graypaper
-
-    # Check memory bounds for auth queue (32 * auth_queue_size bytes)
-    queue_bytes = UInt32(32 * auth_queue_size)
+    # Check memory bounds for auth queue (32 * Cauthqueuesize bytes)
+    queue_bytes = UInt32(32 * Cauthqueuesize)
     if !is_readable(state.memory.access, queue_offset, queue_bytes)
         state.status = :panic
         return state
     end
 
-    # Read authorization queue
-    auth_queue = Vector{Vector{UInt8}}(undef, auth_queue_size)
-    for i in 1:auth_queue_size
-        offset = queue_offset + UInt32((i-1) * 32)
-        auth_queue[i] = state.memory.data[offset+1:offset+32]
-    end
-
-    # Validation checks
-    core_count = 2  # tiny chainspec
-
-    # Check if core index is valid
-    if core_index >= core_count
+    # Validate core index
+    if core_index >= Ccorecount
         state.registers[8] = CORE
         return state
     end
 
-    # Check if caller owns this core (requires full state integration)
-    # TODO: Verify context.service_id == state.assigners[core_index]
-    # For now, stub returns OK
+    # Check if caller owns this core
+    if !isnothing(context.implications)
+        im = context.implications
+        if length(im.privileged_state.assigners) > core_index &&
+           im.service_id != im.privileged_state.assigners[core_index + 1]  # Julia 1-indexed
+            state.registers[8] = HUH
+            return state
+        end
+    end
 
-    # Check if assigner_id is valid service id
+    # Validate assigner_id is valid service id
     if assigner_id >= 2^32
         state.registers[8] = WHO
         return state
     end
 
-    # TODO: Update privileged state:
-    # - state.auth_queue[core_index] = auth_queue
-    # - state.assigners[core_index] = assigner_id
+    # Read authorization queue
+    auth_queue = Vector{Vector{UInt8}}(undef, Cauthqueuesize)
+    for i in 1:Cauthqueuesize
+        offset = queue_offset + UInt32((i-1) * 32)
+        auth_queue[i] = state.memory.data[offset+1:offset+32]
+    end
+
+    # Update privileged state
+    if !isnothing(context.implications)
+        im = context.implications
+        # Ensure auth_queue has enough entries
+        while length(im.privileged_state.auth_queue) <= core_index
+            push!(im.privileged_state.auth_queue, Vector{Vector{UInt8}}())
+        end
+        # Ensure assigners has enough entries
+        while length(im.privileged_state.assigners) <= core_index
+            push!(im.privileged_state.assigners, UInt32(0))
+        end
+
+        im.privileged_state.auth_queue[core_index + 1] = auth_queue  # Julia 1-indexed
+        im.privileged_state.assigners[core_index + 1] = UInt32(assigner_id)
+    end
 
     state.registers[8] = OK
     return state
@@ -1599,9 +1796,26 @@ function host_call_checkpoint(state, context)
     # Set r7 to remaining gas
     state.registers[8] = UInt64(max(0, state.gas))
 
-    # TODO: Set imY' = imX (checkpoint exceptional exit state)
-    # This requires full implications context integration
-    # The exceptional state (imY) should be set to current state (imX)
+    # Checkpoint exceptional state: imY = imX
+    # The exceptional state becomes a copy of the current state
+    # Note: We create a shallow copy since deep copy of recursive structure is complex
+    # In practice, if panic occurs after checkpoint, the exceptional state would be used
+    if !isnothing(context.implications)
+        im = context.implications
+        # Create a copy of current state to use as exceptional exit state
+        im.exceptional_state = ImplicationsContext(
+            im.service_id,
+            im.self,  # TODO: should be deep copy
+            im.privileged_state,  # TODO: should be deep copy
+            im.accounts,  # shared reference for now
+            copy(im.transfers),
+            copy(im.provisions),
+            im.yield_hash !== nothing ? copy(im.yield_hash) : nothing,
+            im.next_free_id,
+            im.current_time,
+            nothing  # no nested exceptional state
+        )
+    end
 
     return state
 end
@@ -1897,17 +2111,48 @@ function host_call_query(state, context)
     # Read hash
     hash = state.memory.data[hash_offset+1:hash_offset+32]
 
-    # TODO: Look up request status in self.requests[(hash, length)]
-    # Request states:
-    # - Not found: return NONE, 0
-    # - []: return 0, 0
-    # - [x]: return 1 + 2^32*x, 0
-    # - [x, y]: return 2 + 2^32*x, y
-    # - [x, y, z]: return 3 + 2^32*x, y + 2^32*z
+    # Look up request status in self.requests[(hash, length)]
+    if !isnothing(context.implications)
+        im = context.implications
+        key = (hash, UInt64(length))
 
-    # For now, stub returns request doesn't exist
-    state.registers[8] = NONE
-    state.registers[9] = 0
+        if haskey(im.self.requests, key)
+            req = im.self.requests[key]
+            state_vec = req.state
+
+            # Encode based on request state
+            if length(state_vec) == 0
+                # []: request exists but not satisfied
+                state.registers[8] = 0
+                state.registers[9] = 0
+            elseif length(state_vec) == 1
+                # [x]: partial
+                state.registers[8] = 1 + (state_vec[1] << 32)
+                state.registers[9] = 0
+            elseif length(state_vec) == 2
+                # [x, y]: satisfied pending
+                state.registers[8] = 2 + (state_vec[1] << 32)
+                state.registers[9] = state_vec[2]
+            elseif length(state_vec) == 3
+                # [x, y, z]: satisfied available
+                state.registers[8] = 3 + (state_vec[1] << 32)
+                state.registers[9] = state_vec[2] + (state_vec[3] << 32)
+            else
+                # Invalid state
+                state.registers[8] = NONE
+                state.registers[9] = 0
+            end
+        else
+            # Request doesn't exist
+            state.registers[8] = NONE
+            state.registers[9] = 0
+        end
+    else
+        # No context - return not found
+        state.registers[8] = NONE
+        state.registers[9] = 0
+    end
+
     return state
 end
 
@@ -1942,13 +2187,40 @@ function host_call_solicit(state, context)
     # Read hash
     hash = state.memory.data[hash_offset+1:hash_offset+32]
 
-    # TODO: Update self.requests:
-    # - If (hash, length) not in requests: create new entry with []
-    # - If requests[(hash, length)] = [x, y]: append current_time to get [x, y, time]
-    # - Otherwise: return HUH (invalid state transition)
+    # Update self.requests
+    if !isnothing(context.implications)
+        im = context.implications
+        key = (hash, UInt64(length))
 
-    # TODO: Check if self.balance >= self.min_balance after request creation
-    # If not, return FULL
+        if haskey(im.self.requests, key)
+            req = im.self.requests[key]
+            state_vec = req.state
+
+            # Valid transitions:
+            # [] -> [] (no-op, but allowed)
+            # [x, y] -> [x, y, current_time]
+            if length(state_vec) == 0
+                # Already in [] state, no change needed
+                # (In practice, this might be redundant, but graypaper allows it)
+            elseif length(state_vec) == 2
+                # Transition from [x, y] to [x, y, time]
+                push!(req.state, UInt64(im.current_time))
+            else
+                # Invalid state transition
+                state.registers[8] = HUH
+                return state
+            end
+        else
+            # Create new request with [] state
+            im.self.requests[key] = PreimageRequest(Vector{UInt64}())
+        end
+
+        # Check balance after request creation
+        if im.self.balance < im.self.min_balance
+            state.registers[8] = FULL
+            return state
+        end
+    end
 
     state.registers[8] = OK
     return state
@@ -2027,8 +2299,11 @@ function host_call_yield(state, context)
     # Read hash
     hash = state.memory.data[hash_offset+1:hash_offset+32]
 
-    # TODO: Set imX.yield = hash
-    # This is the accumulation result that will be included in work results
+    # Set yield hash in implications context
+    if !isnothing(context.implications)
+        im = context.implications
+        im.yield_hash = copy(hash)
+    end
 
     state.registers[8] = OK
     return state
@@ -2074,25 +2349,52 @@ function host_call_provide(state, context)
     # Read data
     data = state.memory.data[data_offset+1:data_offset+data_length]
 
-    # Compute hash of data
-    # TODO: Use proper BLAKE2b hash
-    data_hash = zeros(UInt8, 32)  # stub
+    if !isnothing(context.implications)
+        im = context.implications
 
-    # Check if service exists
-    # TODO: Check if target_service_id in accounts
-    # If not, return WHO
+        # Check if target service exists
+        if !haskey(im.accounts, target_service_id) && target_service_id != im.service_id
+            state.registers[8] = WHO
+            return state
+        end
 
-    # Check if service has request for this preimage
-    # TODO: Check if (blake(data), data_length) in accounts[target_service_id].requests
-    # TODO: Check if requests[(hash, length)] == []
-    # If not [], return HUH (already provided or invalid state)
+        # Get target account
+        target_account = target_service_id == im.service_id ? im.self : im.accounts[target_service_id]
 
-    # Check if provision already exists
-    # TODO: Check if (target_service_id, data) in provisions
-    # If exists, return HUH
+        # Compute hash of data (stub - should use BLAKE2b)
+        # For now, use Julia's built-in hash as placeholder
+        # TODO: Replace with proper BLAKE2b when crypto module is available
+        data_hash = zeros(UInt8, 32)
+        h = hash(data)
+        for i in 1:min(8, 32)
+            data_hash[i] = UInt8((h >> (8*(i-1))) & 0xFF)
+        end
 
-    # TODO: Add to provisions set
-    # provisions = provisions ∪ {(target_service_id, data)}
+        # Check if service has request for this preimage in [] state
+        key = (data_hash, UInt64(data_length))
+        if haskey(target_account.requests, key)
+            req = target_account.requests[key]
+            if length(req.state) != 0
+                # Request not in [] state - already provided or invalid
+                state.registers[8] = HUH
+                return state
+            end
+        else
+            # No request for this preimage
+            state.registers[8] = HUH
+            return state
+        end
+
+        # Check if provision already exists
+        provision_key = (target_service_id, data)
+        if provision_key in im.provisions
+            state.registers[8] = HUH
+            return state
+        end
+
+        # Add to provisions set
+        push!(im.provisions, provision_key)
+    end
 
     state.registers[8] = OK
     return state
