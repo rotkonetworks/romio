@@ -4,7 +4,10 @@
 using StaticArrays
 using DataStructures
 
-# include state-specific types
+# include unified accumulate types (ServiceAccount, PrivilegedState)
+include("../types/accumulate.jl")
+
+# include state-specific types (WorkReport, ValidatorKey, etc.)
 include("types.jl")
 
 struct RecentBlock
@@ -30,13 +33,14 @@ struct JudgmentState
    punish_set::Set{ValidatorId}
 end
 
-struct PrivilegeState
-   manager::ServiceId
-   validator_designator::ServiceId
-   registrar::ServiceId
-   core_assigners::Vector{ServiceId}
-   auto_accumulate::Dict{ServiceId, Gas}
-end
+# PrivilegedState now imported from types/accumulate.jl
+# This provides the complete privileged state with staging_set, auth_queue, etc.
+#
+# NOTE: The global State uses a simpler representation for some fields.
+# When converting to/from ImplicationsContext, we need to handle:
+# - validator_designator → delegator
+# - core_assigners → assigners
+# - auto_accumulate → always_access (different semantics)
 
 
 
@@ -82,7 +86,7 @@ mutable struct State
    timeslot::TimeSlot
    
    # privileges (χ)
-   privileges::PrivilegeState
+   privileges::PrivilegedState
    
    # statistics (π)
    statistics::StatisticsState
@@ -142,13 +146,15 @@ function initial_state()::State
        # timeslot
        TimeSlot(0),
        
-       # privileges
-       PrivilegeState(
-           ServiceId(0),
-           ServiceId(0),
-           ServiceId(0),
-           Vector{ServiceId}(),
-           Dict{ServiceId, Gas}()
+       # privileges (using PrivilegedState from accumulate.jl)
+       PrivilegedState(
+           ServiceId(0),           # manager
+           Vector{ServiceId}(),    # assigners (per-core)
+           ServiceId(0),           # delegator
+           ServiceId(0),           # registrar
+           Vector{Blob}(),         # staging_set
+           Vector{Vector{Blob}}(), # auth_queue
+           Vector{Tuple{ServiceId, Gas}}()  # always_access
        ),
        
        # statistics

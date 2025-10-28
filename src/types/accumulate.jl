@@ -63,9 +63,9 @@ function ServiceAccount(
     balance::Balance,
     min_acc_gas::Gas,
     min_memo_gas::Gas;
-    gratis::UInt64 = 0,
-    created::TimeSlot = 0,
-    parent::ServiceId = 0
+    gratis::UInt64 = UInt64(0),
+    created::TimeSlot = UInt32(0),
+    parent::ServiceId = UInt32(0)
 )
     ServiceAccount(
         code_hash,
