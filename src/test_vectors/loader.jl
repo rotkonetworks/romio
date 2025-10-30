@@ -35,22 +35,55 @@ end
 
 # Parse service account from JSON
 function parse_service_account(json_data)::ServiceAccount
-    # Extract fields from JSON
-    code_hash = parse_hex(get(json_data, :code_hash, "0x" * "00"^32))
-    balance = UInt64(get(json_data, :balance, 0))
-    min_acc_gas = UInt64(get(json_data, :threshold_gas, 0))
-    min_memo_gas = UInt64(get(json_data, :min_gas_limit, 0))
+    # Check if this is accumulate test vector format (has :service field)
+    if haskey(json_data, :service)
+        service_data = json_data[:service]
+        code_hash = parse_hex(service_data[:code_hash])
+        balance = UInt64(service_data[:balance])
+        min_acc_gas = UInt64(service_data[:min_item_gas])
+        min_memo_gas = UInt64(service_data[:min_memo_gas])
 
-    # Create account with defaults
-    account = ServiceAccount(
-        code_hash,
-        balance,
-        min_acc_gas,
-        min_memo_gas,
-        gratis = UInt64(get(json_data, :gratis, 0)),
-        created = UInt32(get(json_data, :creation_slot, 0)),
-        parent = UInt32(get(json_data, :parent, 0))
-    )
+        # Create account with accumulate format fields
+        account = ServiceAccount(
+            code_hash,
+            balance,
+            min_acc_gas,
+            min_memo_gas,
+            gratis = UInt64(get(service_data, :gratis, 0)),
+            created = UInt32(service_data[:creation_slot]),
+            parent = UInt32(service_data[:parent_service])
+        )
+
+        # Set additional fields from service data
+        account.octets = UInt64(service_data[:bytes])
+        account.items = UInt32(service_data[:items])
+        account.min_balance = UInt64(get(service_data, :deposit_offset, 0))
+        account.last_acc = UInt32(service_data[:last_accumulation_slot])
+
+    else
+        # Preimage test vector format (direct fields)
+        code_hash = parse_hex(get(json_data, :code_hash, "0x" * "00"^32))
+        balance = UInt64(get(json_data, :balance, 0))
+        min_acc_gas = UInt64(get(json_data, :threshold_gas, 0))
+        min_memo_gas = UInt64(get(json_data, :min_gas_limit, 0))
+
+        # Create account with defaults
+        account = ServiceAccount(
+            code_hash,
+            balance,
+            min_acc_gas,
+            min_memo_gas,
+            gratis = UInt64(get(json_data, :gratis, 0)),
+            created = UInt32(get(json_data, :creation_slot, 0)),
+            parent = UInt32(get(json_data, :parent, 0))
+        )
+
+        # Set account metadata
+        account.octets = UInt64(get(json_data, :octets, 0))
+        account.items = UInt32(get(json_data, :items, 0))
+        account.min_balance = UInt64(get(json_data, :threshold_balance, 0))
+        account.last_acc = UInt32(get(json_data, :last_accumulate_slot, 0))
+    end
 
     # Load storage if present
     if haskey(json_data, :storage)
@@ -61,9 +94,17 @@ function parse_service_account(json_data)::ServiceAccount
         end
     end
 
-    # Load preimages if present
-    if haskey(json_data, :preimages)
-        for item in json_data[:preimages]
+    # Load preimages if present (check both :preimages and :preimages_blob)
+    preimage_field = if haskey(json_data, :preimages)
+        :preimages
+    elseif haskey(json_data, :preimages_blob)
+        :preimages_blob
+    else
+        nothing
+    end
+
+    if preimage_field !== nothing
+        for item in json_data[preimage_field]
             hash = parse_hex(item[:hash])
             blob = parse_hex(item[:blob])
             account.preimages[hash] = blob
@@ -95,12 +136,6 @@ function parse_service_account(json_data)::ServiceAccount
             end
         end
     end
-
-    # Set account metadata
-    account.octets = UInt64(get(json_data, :octets, 0))
-    account.items = UInt32(get(json_data, :items, 0))
-    account.min_balance = UInt64(get(json_data, :threshold_balance, 0))
-    account.last_acc = UInt32(get(json_data, :last_accumulate_slot, 0))
 
     return account
 end
