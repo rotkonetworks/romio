@@ -1,6 +1,6 @@
 # Test preimage state transition function
 
-include("../../src/stf/preimages.jl")
+include("../../src/stf/preimages_optimized.jl")
 
 println("=== Preimage STF Test Suite ===\n")
 
