@@ -40,52 +40,73 @@ function process_preimages(
         return (state, PreimageResult(nothing, nothing))
     end
 
-    # Validate ordering: services must be in ascending order
+    # Pre-validate ALL preimages before making any state changes
+    # This ensures atomicity - either all succeed or none apply
+
+    # 1. Validate service ordering (ascending service IDs)
     for i in 2:length(preimages)
         if preimages[i].service_id < preimages[i-1].service_id
-            return (state, PreimageResult(nothing, "bad service order"))
+            return (state, PreimageResult(nothing, "preimages_not_sorted_unique"))
         end
     end
 
-    # Validate no duplicate service+hash pairs
-    seen = Set{Tuple{ServiceId, Blob}}()
+    # 2. Pre-compute all hashes and validate within-service ordering
+    preimage_data = []
+    last_service_id = ServiceId(0)
+    last_hash = nothing
+
     for preimage in preimages
         hash = blake2b_hash(preimage.blob)
-        key = (preimage.service_id, hash)
+        blob_length = UInt64(length(preimage.blob))
+
+        # Check hash ordering within same service
+        if preimage.service_id == last_service_id && last_hash !== nothing
+            if hash <= last_hash
+                return (state, PreimageResult(nothing, "preimages_not_sorted_unique"))
+            end
+        end
+
+        last_service_id = preimage.service_id
+        last_hash = hash
+
+        push!(preimage_data, (preimage.service_id, hash, blob_length, preimage.blob))
+    end
+
+    # 3. Validate no duplicates
+    seen = Set{Tuple{ServiceId, Blob}}()
+    for (service_id, hash, _, _) in preimage_data
+        key = (service_id, hash)
         if key in seen
-            return (state, PreimageResult(nothing, "duplicate preimage"))
+            return (state, PreimageResult(nothing, "preimages_not_sorted_unique"))
         end
         push!(seen, key)
     end
 
-    # Process each preimage
+    # 4. Validate all preimages are solicited and not already provided
+    for (service_id, hash, blob_length, _) in preimage_data
+        if !haskey(state.accounts, service_id)
+            return (state, PreimageResult(nothing, "service_not_found"))
+        end
+
+        account = state.accounts[service_id]
+        request_key = (hash, blob_length)
+
+        if !haskey(account.requests, request_key)
+            return (state, PreimageResult(nothing, "preimage_unneeded"))
+        end
+
+        if haskey(account.preimages, hash)
+            return (state, PreimageResult(nothing, "preimage_unneeded"))
+        end
+    end
+
+    # All validations passed - now apply state changes atomically
     provided_count = 0
     provided_size = 0
     new_accounts = copy(state.accounts)
 
-    for preimage in preimages
-        service_id = preimage.service_id
-        blob = preimage.blob
-
-        # Check account exists
-        if !haskey(new_accounts, service_id)
-            return (state, PreimageResult(nothing, "service not found"))
-        end
-
+    for (service_id, hash, blob_length, blob) in preimage_data
         account = new_accounts[service_id]
-        hash = blake2b_hash(blob)
-        blob_length = UInt64(length(blob))
-
-        # Check if preimage is solicited (in requests)
-        request_key = (hash, blob_length)
-        if !haskey(account.requests, request_key)
-            return (state, PreimageResult(nothing, "preimage not solicited"))
-        end
-
-        # Check if already provided
-        if haskey(account.preimages, hash)
-            return (state, PreimageResult(nothing, "preimage already provided"))
-        end
 
         # Store preimage
         account.preimages[hash] = blob
@@ -95,11 +116,10 @@ function process_preimages(
         provided_size += blob_length
 
         # Update request state: [] -> [slot]
-        # The preimage was provided at this slot
+        request_key = (hash, blob_length)
         if haskey(account.requests, request_key)
             req = account.requests[request_key]
             if isempty(req.state)
-                # [] -> [slot]
                 account.requests[request_key] = PreimageRequest([UInt64(slot)])
             end
         end

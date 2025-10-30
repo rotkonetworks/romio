@@ -11,6 +11,12 @@ vectors_dir = "jam-test-vectors/stf/preimages/tiny"
 test_vectors = [
     "preimage_needed-1.json",
     "preimage_needed-2.json",
+    "preimage_not_needed-1.json",
+    "preimage_not_needed-2.json",
+    "preimages_order_check-1.json",
+    "preimages_order_check-2.json",
+    "preimages_order_check-3.json",
+    "preimages_order_check-4.json",
 ]
 
 global passed = 0
