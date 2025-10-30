@@ -72,22 +72,58 @@ mutable struct PVMState
     machines::Dict{UInt32, GuestPVM}  # machine_id => guest PVM
 end
 
-# decode program blob per spec
+# Read LEB128 varint from bytes
+function read_varint(data::Vector{UInt8}, offset::Int)::Tuple{UInt64, Int}
+    result = UInt64(0)
+    shift = 0
+    while offset <= length(data)
+        byte = data[offset]
+        result |= UInt64(byte & 0x7f) << shift
+        offset += 1
+        if (byte & 0x80) == 0
+            break
+        end
+        shift += 7
+    end
+    return (result, offset)
+end
+
+# decode program blob per graypaper spec
 function deblob(program::Vector{UInt8})
-    if length(program) < 3
+    if length(program) < 10
         return nothing
     end
 
-    # decode header - simplified version
     offset = 1
-    jump_count = program[offset]
-    offset += 1
+
+    # Skip metadata header if present (jam-pvm-build format)
+    # Metadata header format: 1 byte length, then N bytes of metadata
+    # First byte 0x47 (71) means the NEXT 71 bytes are metadata
+    # So we need to skip: 1 (length byte) + 71 (metadata) = 72 bytes total
+    if program[1] < 0x80 && program[1] > 0 && length(program) > program[1]
+        # Likely has metadata header
+        metadata_len = Int(program[1])
+        # offset starts at 1, so after metadata it's at 1 + 1 + metadata_len
+        offset = 1 + 1 + metadata_len  # = 73 for metadata_len=71
+    end
+
+    # Read jump table count (varint)
+    jump_count, offset = read_varint(program, offset)
+    if offset > length(program)
+        return nothing
+    end
+
+    # Read jump entry size (1 byte)
     jump_size = program[offset]
     offset += 1
-    code_len = program[offset]
-    offset += 1
 
-    # decode jump table
+    # Read code length (varint)
+    code_len, offset = read_varint(program, offset)
+    if offset > length(program)
+        return nothing
+    end
+
+    # Read jump table
     jump_table = UInt32[]
     for _ in 1:jump_count
         if offset + jump_size > length(program)
@@ -95,29 +131,26 @@ function deblob(program::Vector{UInt8})
         end
         val = UInt32(0)
         for i in 0:jump_size-1
-            if offset + i <= length(program)
-                val |= UInt32(program[offset + i]) << (8*i)
-            end
+            val |= UInt32(program[offset + i]) << (8*i)
         end
         push!(jump_table, val)
         offset += jump_size
     end
 
-    # decode instructions
+    # Read instructions
     if offset + code_len - 1 > length(program)
         return nothing
     end
-    instructions = program[offset:offset+code_len-1]
-    offset += code_len
+    instructions = program[offset:offset+Int(code_len)-1]
+    offset += Int(code_len)
 
-    # decode opcode mask
+    # Read opcode mask
     if offset + code_len - 1 > length(program)
         return nothing
     end
-    # Convert bytes to bits
-    mask_bytes = program[offset:offset+code_len-1]
-    opcode_mask = BitVector(undef, code_len)
-    for i in 1:code_len
+    mask_bytes = program[offset:offset+Int(code_len)-1]
+    opcode_mask = BitVector(undef, Int(code_len))
+    for i in 1:Int(code_len)
         opcode_mask[i] = mask_bytes[i] != 0
     end
 
