@@ -53,22 +53,22 @@ mutable struct GuestPVM
 end
 
 mutable struct PVMState
-    pc::UInt32  # program counter (instruction pointer)
-    gas::Int64  # gas remaining (can go negative)
-    registers::Vector{UInt64}  # 13 general purpose registers
-    memory::Memory
-    status::Symbol  # execution status
-    host_call_id::UInt32  # temporary storage for host call ID
+    # HOT PATH - Accessed every instruction (L1 cache line ~64 bytes)
+    pc::UInt32  # program counter (4 bytes)
+    status::Symbol  # execution status (8 bytes)
+    gas::Int64  # gas remaining (8 bytes)
+    instructions::Vector{UInt8}  # instruction bytes (24 bytes ptr+len+cap)
+    opcode_mask::BitVector  # marks opcode positions (24 bytes)
+    # = 68 bytes (just over 1 cache line)
 
-    # program data
-    instructions::Vector{UInt8}  # instruction bytes
-    opcode_mask::BitVector  # marks opcode positions
+    # FREQUENTLY ACCESSED - Registers and memory (next cache line)
+    registers::Vector{UInt64}  # 13 general purpose registers (24 bytes)
+    memory::Memory  # (8 bytes ptr)
+
+    # LESS FREQUENTLY ACCESSED - Jump table and special features
     jump_table::Vector{UInt32}  # dynamic jump targets
-
-    # export segments (for export host call)
+    host_call_id::UInt32  # temporary storage for host call ID
     exports::Vector{Vector{UInt8}}  # list of exported memory segments
-
-    # inner PVM machines (for machine/peek/poke/pages/invoke/expunge host calls)
     machines::Dict{UInt32, GuestPVM}  # machine_id => guest PVM
 end
 
@@ -286,56 +286,80 @@ function skip_distance(mask::BitVector, pos::Int)
 end
 
 # memory access helpers
-function read_u8(state::PVMState, addr::UInt64)
-    addr32 = UInt32(addr % 2^32)
-    page = div(addr32, PAGE_SIZE)
-    
-    # check access
-    if addr32 < 2^16  # first 64KB always inaccessible
-        state.status = PANIC
-        return UInt8(0)
-    elseif state.memory.access[page + 1] ∉ [READ, WRITE]
-        state.status = FAULT
-        state.pc = page * PAGE_SIZE  # fault address
-        return UInt8(0)
+@inline function read_u8(state::PVMState, addr::UInt64)
+    @inbounds begin
+        addr32 = UInt32(addr % 2^32)
+        page = div(addr32, PAGE_SIZE)
+
+        # check access
+        if addr32 < 2^16  # first 64KB always inaccessible
+            state.status = PANIC
+            return UInt8(0)
+        end
+
+        page_idx = page + 1
+        if page_idx > length(state.memory.access)
+            state.status = FAULT
+            state.pc = page * PAGE_SIZE
+            return UInt8(0)
+        end
+
+        access = state.memory.access[page_idx]
+        if access != READ && access != WRITE
+            state.status = FAULT
+            state.pc = page * PAGE_SIZE
+            return UInt8(0)
+        end
+
+        return state.memory.data[addr32 + 1]
     end
-    
-    return state.memory.data[addr32 + 1]
 end
 
-function write_u8(state::PVMState, addr::UInt64, val::UInt8)
-    addr32 = UInt32(addr % 2^32)
-    page = div(addr32, PAGE_SIZE)
+@inline function write_u8(state::PVMState, addr::UInt64, val::UInt8)
+    @inbounds begin
+        addr32 = UInt32(addr % 2^32)
+        page = div(addr32, PAGE_SIZE)
 
-    # check access
-    if addr32 < 2^16
-        # Address in forbidden zone
-        state.status = PANIC
-        return
-    elseif page + 1 > length(state.memory.access) || state.memory.access[page + 1] != WRITE
-        # No write permission
-        state.status = FAULT
-        state.pc = page * PAGE_SIZE
-        return
+        # check access
+        if addr32 < 2^16
+            state.status = PANIC
+            return
+        end
+
+        page_idx = page + 1
+        if page_idx > length(state.memory.access)
+            state.status = FAULT
+            state.pc = page * PAGE_SIZE
+            return
+        end
+
+        if state.memory.access[page_idx] != WRITE
+            state.status = FAULT
+            state.pc = page * PAGE_SIZE
+            return
+        end
+
+        state.memory.data[addr32 + 1] = val
     end
-
-    state.memory.data[addr32 + 1] = val
 end
 
-function read_bytes(state::PVMState, addr::UInt64, len::Int)
-    result = UInt8[]
-    for i in 0:len-1
-        push!(result, read_u8(state, addr + i))
+# Optimized: pre-allocate result vector
+@inline function read_bytes(state::PVMState, addr::UInt64, len::Int)
+    result = Vector{UInt8}(undef, len)
+    @inbounds for i in 1:len
+        result[i] = read_u8(state, addr + UInt64(i - 1))
         if state.status != CONTINUE
+            resize!(result, i)  # Trim to actual read length
             return result
         end
     end
     return result
 end
 
-function write_bytes(state::PVMState, addr::UInt64, data::Vector{UInt8})
-    for i in 0:length(data)-1
-        write_u8(state, addr + i, data[i + 1])
+# Optimized: inline loop for small writes
+@inline function write_bytes(state::PVMState, addr::UInt64, data::Vector{UInt8})
+    @inbounds for i in 1:length(data)
+        write_u8(state, addr + UInt64(i - 1), data[i])
         if state.status != CONTINUE
             return
         end
@@ -418,36 +442,41 @@ function smod(a::T, b::T) where T <: Integer
 end
 
 # single step execution
-function step!(state::PVMState)
-    if state.status != CONTINUE
-        return
-    end
-    
-    # bounds check
-    if state.pc >= length(state.instructions)
-        state.status = PANIC
-        return
-    end
-    
-    # get opcode if valid
-    opcode = if state.opcode_mask[state.pc + 1]
-        state.instructions[state.pc + 1]
-    else
-        0  # invalid -> trap
-    end
+@inline function step!(state::PVMState)
+    @inbounds begin
+        if state.status != CONTINUE
+            return
+        end
 
-    # execute instruction
-    skip = skip_distance(state.opcode_mask, state.pc + 1)
-    execute_instruction!(state, opcode, skip)
-    
-    # advance pc if still running and not branching instruction
-    if state.status == CONTINUE && !is_branch_instruction(opcode)
-        state.pc += 1 + skip
+        # bounds check
+        pc_idx = Int(state.pc) + 1
+        if pc_idx > length(state.instructions)
+            state.status = PANIC
+            return
+        end
+
+        # get opcode if valid (no bounds check - proven above)
+        opcode = if state.opcode_mask[pc_idx]
+            state.instructions[pc_idx]
+        else
+            0x00  # invalid -> trap
+        end
+
+        # execute instruction
+        skip = skip_distance(state.opcode_mask, pc_idx)
+        execute_instruction!(state, opcode, skip)
+
+        # advance pc if still running and not branching instruction
+        if state.status == CONTINUE && !is_branch_instruction(opcode)
+            state.pc += 1 + skip
+        end
     end
 end
 
-function is_branch_instruction(opcode::UInt8)
-    return opcode in [40, 50, 170:175..., 80:90..., 180]
+@inline function is_branch_instruction(opcode::UInt8)
+    # Optimized: direct comparisons faster than set lookup
+    return opcode == 40 || opcode == 50 || opcode == 180 ||
+           (170 <= opcode <= 175) || (80 <= opcode <= 90)
 end
 
 # complete instruction execution implementation
@@ -1805,15 +1834,15 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
     
     # initialize state
     state = PVMState(
-        0,  # pc starts at 0
-        Int64(gas),
-        zeros(UInt64, 13),
-        Memory(),
-        CONTINUE,
-        0,  # host_call_id
-        instructions,
-        opcode_mask,
-        jump_table,
+        UInt32(0),  # pc starts at 0
+        CONTINUE,  # status
+        Int64(gas),  # gas
+        instructions,  # instructions
+        opcode_mask,  # opcode_mask
+        zeros(UInt64, 13),  # registers
+        Memory(),  # memory
+        jump_table,  # jump_table
+        UInt32(0),  # host_call_id
         Vector{UInt8}[],  # exports
         Dict{UInt32, GuestPVM}()  # machines
     )
@@ -1879,15 +1908,15 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
     # initialize state
     state = PVMState(
-        0,  # pc starts at 0
-        Int64(gas),
-        zeros(UInt64, 13),
-        Memory(),
-        CONTINUE,
-        0,  # host_call_id
-        instructions,
-        opcode_mask,
-        jump_table,
+        UInt32(0),  # pc starts at 0
+        CONTINUE,  # status
+        Int64(gas),  # gas
+        instructions,  # instructions
+        opcode_mask,  # opcode_mask
+        zeros(UInt64, 13),  # registers
+        Memory(),  # memory
+        jump_table,  # jump_table
+        UInt32(0),  # host_call_id
         Vector{UInt8}[],  # exports
         Dict{UInt32, GuestPVM}()  # machines
     )
