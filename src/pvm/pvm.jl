@@ -1278,14 +1278,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        state.registers[ra + 1] = (state.registers[rb + 1] + immx) % 2^64
+        state.registers[ra + 1] = UInt64(state.registers[rb + 1] + immx)
         
     elseif opcode == 150  # mul_imm_64
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        state.registers[ra + 1] = (state.registers[rb + 1] * immx) % 2^64
+        state.registers[ra + 1] = UInt64(state.registers[rb + 1] * immx)
         
     elseif opcode == 151  # shlo_l_imm_64
         ra = get_register_index(state, 1, 0)
@@ -1293,7 +1293,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         shift = immx % 64
-        state.registers[ra + 1] = (state.registers[rb + 1] << shift) % 2^64
+        state.registers[ra + 1] = UInt64(state.registers[rb + 1] << shift)
         
     elseif opcode == 152  # shlo_r_imm_64
         ra = get_register_index(state, 1, 0)
@@ -1317,7 +1317,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        state.registers[ra + 1] = (immx + 2^64 - state.registers[rb + 1]) % 2^64
+        state.registers[ra + 1] = UInt64(immx - state.registers[rb + 1])
         
     elseif opcode == 155  # shlo_l_imm_alt_64
         ra = get_register_index(state, 1, 0)
@@ -1325,7 +1325,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         shift = state.registers[rb + 1] % 64
-        state.registers[ra + 1] = (immx << shift) % 2^64
+        state.registers[ra + 1] = UInt64(immx << shift)
         
     elseif opcode == 156  # shlo_r_imm_alt_64
         ra = get_register_index(state, 1, 0)
@@ -1351,7 +1351,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         immx = decode_immediate(state, 2, lx)
         rot = immx % 64
         val = state.registers[rb + 1]
-        state.registers[ra + 1] = ((val >> rot) | (val << (64 - rot))) % 2^64
+        state.registers[ra + 1] = UInt64((val >> rot) | (val << (64 - rot)))
         
     elseif opcode == 159  # rot_r_64_imm_alt
         ra = get_register_index(state, 1, 0)
@@ -1359,7 +1359,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         rot = state.registers[rb + 1] % 64
-        state.registers[ra + 1] = ((immx >> rot) | (immx << (64 - rot))) % 2^64
+        state.registers[ra + 1] = UInt64((immx >> rot) | (immx << (64 - rot)))
         
     elseif opcode == 160  # rot_r_32_imm
         ra = get_register_index(state, 1, 0)
@@ -1567,7 +1567,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
         shift = state.registers[rb + 1] % 64
-        state.registers[rd + 1] = (state.registers[ra + 1] << shift) % 2^64
+        state.registers[rd + 1] = UInt64(state.registers[ra + 1] << shift)
         
     elseif opcode == 208  # shlo_r_64
         ra = get_register_index(state, 1, 0)
@@ -1642,7 +1642,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rd = get_register_index(state, 2, 0)
         rot = state.registers[rb + 1] % 64
         val = state.registers[ra + 1]
-        state.registers[rd + 1] = ((val << rot) | (val >> (64 - rot))) % 2^64
+        state.registers[rd + 1] = UInt64((val << rot) | (val >> (64 - rot)))
         
     elseif opcode == 221  # rot_l_32
         ra = get_register_index(state, 1, 0)
@@ -1659,7 +1659,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rd = get_register_index(state, 2, 0)
         rot = state.registers[rb + 1] % 64
         val = state.registers[ra + 1]
-        state.registers[rd + 1] = ((val >> rot) | (val << (64 - rot))) % 2^64
+        state.registers[rd + 1] = UInt64((val >> rot) | (val << (64 - rot)))
         
     elseif opcode == 223  # rot_r_32
         ra = get_register_index(state, 1, 0)
@@ -1760,19 +1760,19 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
-        state.registers[rd + 1] = (state.registers[ra + 1] + state.registers[rb + 1]) % 2^64
+        state.registers[rd + 1] = UInt64(state.registers[ra + 1] + state.registers[rb + 1])
         
     elseif opcode == 201  # sub_64
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
-        state.registers[rd + 1] = (state.registers[ra + 1] + 2^64 - state.registers[rb + 1]) % 2^64
+        state.registers[rd + 1] = UInt64(state.registers[ra + 1] - state.registers[rb + 1])
         
     elseif opcode == 202  # mul_64
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
-        state.registers[rd + 1] = (state.registers[ra + 1] * state.registers[rb + 1]) % 2^64
+        state.registers[rd + 1] = UInt64(state.registers[ra + 1] * state.registers[rb + 1])
         
     elseif opcode == 210  # and
         ra = get_register_index(state, 1, 0)
@@ -1926,15 +1926,21 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
     # run until halt
     initial_gas = state.gas
-    invocation_type = :refine  # Default to refine for testing
+    invocation_type = :accumulate  # Set to accumulate for accumulate context
+    step_count = 0
 
     while state.gas > 0
         if state.status == CONTINUE
             step!(state)
+            step_count += 1
+            if state.status != CONTINUE
+                println("[DEBUG PVM] Status changed to $(state.status) at step $step_count, PC=$(state.pc)")
+            end
         elseif state.status == HOST
             # Save PC before host call
             pc_before = state.pc
 
+            println("[DEBUG PVM] Entering HOST state, host_call_id=$(state.host_call_id)")
             # Handle host call with provided context
             host_call_id = Int(state.host_call_id)
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
@@ -1965,6 +1971,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     end
 
     gas_used = initial_gas - max(state.gas, 0)
+    println("[DEBUG PVM] Execution complete: status=$(state.status), steps=$step_count, gas_used=$gas_used")
     return (state.status, output, gas_used, state.exports)
 end
 

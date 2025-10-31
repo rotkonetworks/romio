@@ -280,6 +280,7 @@ Returns: Updated state
 function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbol)
     # All host calls cost at least 10 gas (base cost)
     # Additional costs may be added by specific functions
+    println("[DEBUG] Host call dispatch: call_id=$call_id, invocation_type=$invocation_type")
 
     if call_id == GAS
         return host_call_gas(state, context)
@@ -723,6 +724,7 @@ Returns in r7: previous value length (or NONE if key didn't exist, or FULL if in
 Gas cost: 10
 """
 function host_call_write(state, context)
+    println("[DEBUG] WRITE host call invoked")
     # Charge gas
     state.gas -= 10
     if state.gas < 0
@@ -736,13 +738,17 @@ function host_call_write(state, context)
     value_offset = state.registers[10] # r9
     value_length = state.registers[11] # r10
 
+    println("[DEBUG] WRITE params: key_offset=$key_offset, key_length=$key_length, value_offset=$value_offset, value_length=$value_length")
+
     # Check context
-    if context === nothing || context.service_account === nothing
+    if context === nothing || context.implications === nothing
+        println("[DEBUG] WRITE: No context or implications, returning NONE")
         state.registers[8] = NONE
         return state
     end
 
-    account = context.service_account
+    account = context.implications.self
+    println("[DEBUG] WRITE: Before - storage items=$(length(account.storage)), octets=$(account.octets), items=$(account.items)")
 
     # Check if key memory is readable
     if !is_readable(state.memory.access, UInt32(key_offset), UInt32(key_length))
@@ -804,10 +810,12 @@ function host_call_write(state, context)
             account.items += 1
         end
         account.octets = new_octets
+        println("[DEBUG] WRITE: After - storage items=$(length(account.storage)), octets=$(account.octets), items=$(account.items)")
     end
 
     # Return old value length (or NONE if didn't exist)
     state.registers[8] = old_value_length
+    println("[DEBUG] WRITE: Returning old_value_length=$old_value_length")
     return state
 end
 
