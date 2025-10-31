@@ -82,21 +82,33 @@ function execute_accumulate(
             context
         )
 
-        println("    PVM Status: $status, Gas used: $gas_used")
-
         # Check if execution succeeded
         if status != PVM.HALT
             # Execution failed - return unchanged account
-            println("    ❌ PVM did not halt (status: $status)")
             return (account, false)
         end
 
         # Apply implications from context to service account
         # The host calls (WRITE, etc.) have already modified implications.self
         updated_account = implications.self
-        println("    ✓ PVM halted successfully")
-        println("      Storage items: $(length(updated_account.storage))")
-        println("      Last acc: $(updated_account.last_acc)")
+
+        # Update last_acc to current slot (graypaper: accountspostxfer)
+        updated_account = ServiceAccount(
+            updated_account.code_hash,
+            updated_account.balance,
+            updated_account.min_acc_gas,
+            updated_account.min_memo_gas,
+            gratis = updated_account.gratis,
+            created = updated_account.created,
+            parent = updated_account.parent,
+            octets = updated_account.octets,
+            items = updated_account.items,
+            min_balance = updated_account.min_balance,
+            last_acc = UInt32(state.slot),  # Update to current slot
+            storage = updated_account.storage,
+            preimages = updated_account.preimages,
+            preimage_meta = updated_account.preimage_meta
+        )
 
         return (updated_account, true)
     catch e

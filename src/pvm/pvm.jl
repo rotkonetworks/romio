@@ -72,86 +72,204 @@ mutable struct PVMState
     machines::Dict{UInt32, GuestPVM}  # machine_id => guest PVM
 end
 
-# Read LEB128 varint from bytes
+# Read graypaper varint from bytes
+# Graypaper encoding: see serialization section
 function read_varint(data::Vector{UInt8}, offset::Int)::Tuple{UInt64, Int}
-    result = UInt64(0)
-    shift = 0
-    while offset <= length(data)
-        byte = data[offset]
-        result |= UInt64(byte & 0x7f) << shift
-        offset += 1
-        if (byte & 0x80) == 0
-            break
-        end
-        shift += 7
+    if offset > length(data)
+        return (UInt64(0), offset)
     end
-    return (result, offset)
+
+    first_byte = data[offset]
+
+    # Case 1: x = 0
+    if first_byte == 0
+        return (UInt64(0), offset + 1)
+    end
+
+    # Case 2: x < 128 (l=0, direct encoding for values < 2^7)
+    # For l=0: 2^7*0 <= x < 2^7*1, so 0 <= x < 128
+    # First byte range: [2^8 - 2^8, 2^8 - 2^7) = [0, 128)
+    if first_byte < 128
+        return (UInt64(first_byte), offset + 1)
+    end
+
+    # Determine l from first byte
+    # l=1: [128, 192) -> 2^7 <= x < 2^14
+    # l=2: [192, 224) -> 2^14 <= x < 2^21
+    # l=3: [224, 240) -> 2^21 <= x < 2^28
+    # l=4: [240, 248) -> 2^28 <= x < 2^35
+    # l=5: [248, 252) -> 2^35 <= x < 2^42
+    # l=6: [252, 254) -> 2^42 <= x < 2^49
+    # l=7: [254, 255) -> 2^49 <= x < 2^56
+    # l=8: [255, 256) -> 2^56 <= x < 2^64
+
+    l = if first_byte < 192
+        1
+    elseif first_byte < 224
+        2
+    elseif first_byte < 240
+        3
+    elseif first_byte < 248
+        4
+    elseif first_byte < 252
+        5
+    elseif first_byte < 254
+        6
+    elseif first_byte < 255
+        7
+    else  # first_byte == 255
+        8
+    end
+
+    if offset + l > length(data)
+        return (UInt64(0), offset)
+    end
+
+    # Extract header value
+    # header_val = first_byte - (2^8 - 2^(8-l))
+    header_offset = UInt64(256 - (1 << (8 - l)))
+    header_val = UInt64(first_byte) - header_offset
+
+    # Read next l bytes as little-endian
+    remainder = UInt64(0)
+    for i in 0:l-1
+        remainder |= UInt64(data[offset + 1 + i]) << (8 * i)
+    end
+
+    # Reconstruct: header_val * 2^(8l) + remainder
+    result = (header_val << (8 * l)) + remainder
+
+    return (result, offset + 1 + l)
 end
 
-# decode program blob per graypaper spec
+# Read fixed-length little-endian integer (graypaper encode[l])
+function read_fixed_le(data::Vector{UInt8}, offset::Int, len::Int)::Tuple{UInt64, Int}
+    if offset + len - 1 > length(data)
+        return (UInt64(0), offset)
+    end
+
+    result = UInt64(0)
+    for i in 0:len-1
+        result |= UInt64(data[offset + i]) << (8 * i)
+    end
+
+    return (result, offset + len)
+end
+
+# decode program blob per graypaper spec (equation 764 + deblob)
+# Format: E_3(len(o)) ++ E_3(len(w)) ++ E_2(z) ++ E_3(s) ++ o ++ w ++ E_4(len(c)) ++ c
+# Then c = encode(len(j)) ++ encode[1](z) ++ encode(len(c)) ++ encode[z](j) ++ code ++ mask
 function deblob(program::Vector{UInt8})
-    if length(program) < 10
+    if length(program) < 20
         return nothing
     end
 
     offset = 1
 
-    # Skip metadata header if present (jam-pvm-build format)
-    # Metadata header format: 1 byte length, then N bytes of metadata
-    # First byte 0x47 (71) means the NEXT 71 bytes are metadata
-    # So we need to skip: 1 (length byte) + 71 (metadata) = 72 bytes total
+    # Skip metadata header if present (toplevel service blob format)
+    # encode(var(m), c) = encode(len(m)) ++ m ++ c
     if program[1] < 0x80 && program[1] > 0 && length(program) > program[1]
-        # Likely has metadata header
         metadata_len = Int(program[1])
-        # offset starts at 1, so after metadata it's at 1 + 1 + metadata_len
-        offset = 1 + 1 + metadata_len  # = 73 for metadata_len=71
+        offset = 1 + 1 + metadata_len  # Skip length byte + metadata
     end
 
-    # Read jump table count (varint)
-    jump_count, offset = read_varint(program, offset)
+    # Parse graypaper program blob format (equation 764)
+    # E_3(len(o)) - RO data length (3 bytes, little-endian)
+    ro_len, offset = read_fixed_le(program, offset, 3)
+
+    # E_3(len(w)) - RW data length (3 bytes)
+    rw_len, offset = read_fixed_le(program, offset, 3)
+
+    # E_2(z) - stack pages (2 bytes)
+    stack_pages, offset = read_fixed_le(program, offset, 2)
+
+    # E_3(s) - stack bytes (3 bytes)
+    stack_bytes, offset = read_fixed_le(program, offset, 3)
+
+    # Skip o - RO data
+    offset += Int(ro_len)
     if offset > length(program)
         return nothing
     end
 
+    # Skip w - RW data
+    offset += Int(rw_len)
+    if offset > length(program)
+        return nothing
+    end
+
+    # E_4(len(c)) - code blob length (4 bytes)
+    code_blob_len, offset = read_fixed_le(program, offset, 4)
+
+
+    if offset + Int(code_blob_len) - 1 > length(program)
+        return nothing
+    end
+
+    # Extract code blob c
+    code_blob = program[offset:offset+Int(code_blob_len)-1]
+
+    # Now deblob the code blob c
+    # Format: encode(len(j)) ++ encode[1](z) ++ encode(len(c)) ++ encode[z](j) ++ code ++ mask
+    c_offset = 1
+
+    # Read jump table count (varint)
+    jump_count, c_offset = read_varint(code_blob, c_offset)
+    if c_offset > length(code_blob)
+        return nothing
+    end
+
     # Read jump entry size (1 byte)
-    jump_size = program[offset]
-    offset += 1
+    if c_offset > length(code_blob)
+        return nothing
+    end
+    jump_size = code_blob[c_offset]
+    c_offset += 1
 
     # Read code length (varint)
-    code_len, offset = read_varint(program, offset)
-    if offset > length(program)
+    code_len, c_offset = read_varint(code_blob, c_offset)
+    if c_offset > length(code_blob)
         return nothing
     end
 
     # Read jump table
     jump_table = UInt32[]
     for _ in 1:jump_count
-        if offset + jump_size > length(program)
+        if c_offset + jump_size > length(code_blob)
             return nothing
         end
         val = UInt32(0)
         for i in 0:jump_size-1
-            val |= UInt32(program[offset + i]) << (8*i)
+            val |= UInt32(code_blob[c_offset + i]) << (8*i)
         end
         push!(jump_table, val)
-        offset += jump_size
+        c_offset += jump_size
     end
+
 
     # Read instructions
-    if offset + code_len - 1 > length(program)
+    if c_offset + Int(code_len) - 1 > length(code_blob)
         return nothing
     end
-    instructions = program[offset:offset+Int(code_len)-1]
-    offset += Int(code_len)
+    instructions = code_blob[c_offset:c_offset+Int(code_len)-1]
+    c_offset += Int(code_len)
 
-    # Read opcode mask
-    if offset + code_len - 1 > length(program)
+    # Read opcode mask (bitstring encoded - 8 bits per byte)
+    # Mask length in bytes: ceil(code_len / 8)
+    mask_byte_len = div(Int(code_len) + 7, 8)
+
+    if c_offset + mask_byte_len - 1 > length(code_blob)
         return nothing
     end
-    mask_bytes = program[offset:offset+Int(code_len)-1]
+
+    mask_bytes = code_blob[c_offset:c_offset+mask_byte_len-1]
+
+    # Decode bitstring: bits are packed LSB first in each byte
     opcode_mask = BitVector(undef, Int(code_len))
-    for i in 1:Int(code_len)
-        opcode_mask[i] = mask_bytes[i] != 0
+    for i in 0:Int(code_len)-1
+        byte_idx = div(i, 8) + 1  # Julia 1-indexed
+        bit_idx = i % 8
+        opcode_mask[i+1] = (mask_bytes[byte_idx] & (1 << bit_idx)) != 0
     end
 
     return (instructions, opcode_mask, jump_table)
@@ -320,7 +438,6 @@ function step!(state::PVMState)
 
     # execute instruction
     skip = skip_distance(state.opcode_mask, state.pc + 1)
-    # println("DEBUG step: PC=$(state.pc), opcode=$(opcode) (0x$(string(opcode, base=16))), skip=$(skip)")
     execute_instruction!(state, opcode, skip)
     
     # advance pc if still running and not branching instruction
