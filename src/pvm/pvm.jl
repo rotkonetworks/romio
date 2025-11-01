@@ -311,7 +311,16 @@ end
             return UInt8(0)
         end
 
-        return state.memory.data[addr32 + 1]
+        val = state.memory.data[addr32 + 1]
+
+        # Debug: log reads from input region (high memory)
+        input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
+        if addr32 >= input_start && addr32 < input_start + 20
+            offset = addr32 - input_start
+            println("    [READ INPUT] offset=$offset, value=0x$(string(val, base=16))")
+        end
+
+        return val
     end
 end
 
@@ -1921,7 +1930,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
     # Determine starting PC based on entry point
     # Entry point 0 = start at PC 0
-    # Entry point N (0-indexed in spec) = start at jump_table[N+1] (Julia 1-indexed)
+    # Entry point N (0-indexed) = start at jump_table[N+1] (Julia 1-indexed)
     start_pc = if entry_point == 0
         UInt32(0)
     else
@@ -1929,7 +1938,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
             println("ERROR: Entry point $entry_point requested but jump_table only has $(length(jump_table)) entries")
             return (PANIC, UInt8[], 0, Vector{UInt8}[])
         end
-        # Entry point 5 (0-indexed) means 6th function → jump_table[6] in Julia
+        # Entry point 5 (0-indexed) → jump_table[6] in Julia
         jump_table[entry_point + 1]
     end
 

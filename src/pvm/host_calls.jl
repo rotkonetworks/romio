@@ -281,7 +281,17 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
     # All host calls cost at least 10 gas (base cost)
     # Additional costs may be added by specific functions
 
-    if call_id > 26
+    if call_id == 100
+        # Test-only host call - just succeed and return OK
+        println("    [DISPATCH] Test host call 100 - returning OK")
+        state.gas -= 10
+        if state.gas < 0
+            state.status = :oog
+            return state
+        end
+        state.registers[8] = 0  # Return OK (0)
+        return state
+    elseif call_id > 26
         println("    [DISPATCH] Unknown host call $call_id - returning WHAT")
     end
 
