@@ -446,13 +446,18 @@ function host_call_fetch(state, context, invocation_type)
         return state
     end
 
-    # Copy data to memory
-    for i in 0:(l-1)
-        if f + i < total_length
-            addr = output_offset + i
-            if addr < length(state.memory.data)
-                state.memory.data[addr + 1] = data[f + i + 1]
-            end
+    # Copy data to memory (optimized bulk copy)
+    if l > 0
+        # Calculate safe copy range
+        src_start = Int(f) + 1
+        src_end = min(Int(f + l), total_length)
+        dst_start = Int(output_offset) + 1
+        dst_end = min(Int(output_offset + l), length(state.memory.data))
+        copy_len = min(src_end - src_start + 1, dst_end - dst_start + 1)
+
+        if copy_len > 0
+            # Bulk copy - much faster than byte-by-byte
+            copyto!(state.memory.data, dst_start, data, src_start, copy_len)
         end
     end
 

@@ -1971,7 +1971,11 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     if step_count >= max_steps
         println("WARNING: PVM hit step limit of $max_steps steps")
     end
-    println("PVM execution complete: status=$(state.status), steps=$step_count, gas_used=$gas_used")
+    if state.status == FAULT
+        println("PVM execution FAULTED at PC=$(state.pc), steps=$step_count, gas_used=$gas_used")
+    else
+        println("PVM execution complete: status=$(state.status), steps=$step_count, gas_used=$gas_used")
+    end
     return (state.status, output, gas_used, state.exports)
 end
 
