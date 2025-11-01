@@ -48,7 +48,8 @@ end
 function execute_accumulate(
     work_result,
     account::ServiceAccount,
-    state::State
+    state::State,
+    current_slot::TimeSlot
 )::Tuple{ServiceAccount, Bool}
     # Get service code from preimages
     if !haskey(account.preimages, work_result.code_hash)
@@ -64,14 +65,35 @@ function execute_accumulate(
         account,
         state.accounts,
         state.privileges,
-        state.slot
+        current_slot
     )
 
-    # Create host call context
-    context = HostCallContext(implications, state.entropy)
+    # Create work package context for FETCH host call
+    # The service code will fetch the work result via FETCH(selector=7) for work package data
+    work_package = Dict{Symbol, Any}(
+        :results => [work_result.result.ok]  # Store the work result for FETCH
+    )
 
-    # Prepare input: payload_hash
-    input = work_result.payload_hash
+    # Create host call context with work package
+    context = HostCallContext(implications, state.entropy, nothing, work_package, nothing)
+
+    # Prepare input: result from refine phase (for accumulate)
+    # If refine succeeded (ok), pass the result; if it failed (error), skip accumulate
+    if !haskey(work_result.result, :ok)
+        # Refine failed - skip accumulate
+        return (account, false)
+    end
+
+    # Per graypaper: PVM input for accumulate is encode(timeslot, service_id, input_count)
+    # The actual result data is made available via work_package context
+    # Encode: timeslot (u32) + service_id (u32) + input_count (u32)
+    input = UInt8[]
+    # Encode timeslot (little-endian u32)
+    append!(input, reinterpret(UInt8, [UInt32(current_slot)]))
+    # Encode service_id (little-endian u32)
+    append!(input, reinterpret(UInt8, [UInt32(work_result.service_id)]))
+    # Encode input_count (little-endian u32) - we have 1 work result
+    append!(input, reinterpret(UInt8, [UInt32(1)]))
 
     # Execute PVM with accumulate invocation type
     try
@@ -104,7 +126,7 @@ function execute_accumulate(
             octets = updated_account.octets,
             items = updated_account.items,
             min_balance = updated_account.min_balance,
-            last_acc = UInt32(state.slot),  # Update to current slot
+            last_acc = UInt32(current_slot),  # Update to current slot
             storage = updated_account.storage,
             preimages = updated_account.preimages,
             preimage_meta = updated_account.preimage_meta
@@ -162,7 +184,7 @@ function process_accumulate(
             end
 
             # Execute PVM accumulate invocation
-            updated_account, success = execute_accumulate(work_result, account, state)
+            updated_account, success = execute_accumulate(work_result, account, state, slot)
             if success
                 # Replace account with updated version
                 new_accounts[work_result.service_id] = updated_account

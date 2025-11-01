@@ -255,7 +255,7 @@ function is_writable(memory_permissions, offset::UInt32, len::UInt32)
             return false
         end
         perm = memory_permissions[page_idx]
-        if perm !== :write && perm !== :rw
+        if perm !== :W  # WRITE constant from pvm.jl
             return false
         end
     end

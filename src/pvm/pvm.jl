@@ -686,6 +686,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         immx = decode_immediate(state, 2, lx)
         val = state.registers[ra + 1]
         bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:7]
+
         write_bytes(state, immx, bytes)
         
     # instructions with one register & two immediates (70-73)
@@ -994,7 +995,6 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ra = 8  # a0 is register 8
         rb = 9  # a1 is register 9
         state.registers[rd + 1] = state.registers[ra + 1] + state.registers[rb + 1]
-        println("add_32: s0 = a0 + a1 = $(state.registers[8+1]) + $(state.registers[9+1]) = $(state.registers[5+1])")
 
     elseif opcode == 120 && false  # load_i32_ind (load signed 32-bit from [base + offset])
         rd = get_register_index(state, 1, 0)  # Dest register
@@ -1078,7 +1078,8 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        state.registers[ra + 1] = UInt64(read_u8(state, state.registers[rb + 1] + immx))
+        addr = state.registers[rb + 1] + immx
+        state.registers[ra + 1] = UInt64(read_u8(state, addr))
         
     elseif opcode == 125  # load_ind_i8
         ra = get_register_index(state, 1, 0)
@@ -2002,14 +2003,29 @@ function setup_memory!(state::PVMState, input::Vector{UInt8})
     end
 
     # Initialize heap pointer per traces/README.md memory model
-    # ro_data: 0x10000 (ZONE_SIZE)
-    # rw_data: 0x20000 (2*ZONE_SIZE)
-    # heap starts after rw_data + one page
-    rw_data_address = UInt32(2 * ZONE_SIZE)
-    state.memory.current_heap_pointer = rw_data_address + UInt32(PAGE_SIZE)
+    # Zone 0: 0x00000-0x0FFFF (forbidden)
+    # Zone 1: 0x10000-0x1FFFF (ro_data - readable)
+    # Zone 2: 0x20000-0x2FFFF (rw_data - writable)
+    # Zone 3+: 0x30000+ (heap - writable)
 
-    # Mark initial rw_data area as writable (up to heap start)
-    for page in div(rw_data_address, PAGE_SIZE):div(state.memory.current_heap_pointer - 1, PAGE_SIZE)
+    ro_data_start = UInt32(ZONE_SIZE)
+    ro_data_end = UInt32(2 * ZONE_SIZE)
+    rw_data_start = ro_data_end
+    rw_data_end = UInt32(3 * ZONE_SIZE)
+
+    # Pre-allocate initial heap (1 zone = 64KB)
+    heap_prealloc_end = UInt32(4 * ZONE_SIZE)
+    state.memory.current_heap_pointer = heap_prealloc_end
+
+    # Mark ro_data zone as readable (zone 1: 0x10000-0x1FFFF)
+    for page in div(ro_data_start, PAGE_SIZE):div(ro_data_end - 1, PAGE_SIZE)
+        if page + 1 <= length(state.memory.access)
+            state.memory.access[page + 1] = READ
+        end
+    end
+
+    # Mark rw_data zone + initial heap as writable (zones 2-3: 0x20000-0x3FFFF)
+    for page in div(rw_data_start, PAGE_SIZE):div(heap_prealloc_end - 1, PAGE_SIZE)
         if page + 1 <= length(state.memory.access)
             state.memory.access[page + 1] = WRITE
         end
