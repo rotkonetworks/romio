@@ -492,6 +492,15 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 0x0A  # ecalli
         imm = decode_immediate(state, 1, min(4, skip))
+        println("    [ECALLI] id=$imm at PC=0x$(string(state.pc, base=16)), r7=$(state.registers[8])")
+        if imm == 100
+            # Show exactly what bytes we're reading
+            bytes_shown = min(10, length(state.instructions) - Int(state.pc))
+            instr_bytes = state.instructions[state.pc+1:state.pc+bytes_shown]
+            println("      Instruction bytes: $(instr_bytes)")
+            println("      Decoded immediate (len=$(min(4, skip))): $imm")
+            println("      Registers: r7=$(state.registers[8]), r10=$(state.registers[11])")
+        end
         state.status = HOST
         # store host call id in dedicated field (don't overwrite registers!)
         state.host_call_id = UInt32(imm)
@@ -1129,7 +1138,10 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         bytes = read_bytes(state, state.registers[rb + 1] + immx, 8)
-        state.registers[ra + 1] = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
+        # If read failed (returned fewer than 8 bytes), register not updated and status already set
+        if length(bytes) == 8
+            state.registers[ra + 1] = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
+        end
         
     elseif opcode == 131  # add_imm_32
         ra = get_register_index(state, 1, 0)
@@ -1899,7 +1911,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
 end
 
 # Overload with context parameter
-function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context)
+function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context, entry_point::Int = 0)
     result = deblob(program)
     if result === nothing
         return (PANIC, UInt8[], 0, Vector{UInt8}[])
@@ -1907,9 +1919,31 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
     instructions, opcode_mask, jump_table = result
 
+    # Determine starting PC based on entry point
+    # Entry point 0 = start at PC 0
+    # Entry point N (0-indexed in spec) = start at jump_table[N+1] (Julia 1-indexed)
+    start_pc = if entry_point == 0
+        UInt32(0)
+    else
+        if entry_point + 1 > length(jump_table)
+            println("ERROR: Entry point $entry_point requested but jump_table only has $(length(jump_table)) entries")
+            return (PANIC, UInt8[], 0, Vector{UInt8}[])
+        end
+        # Entry point 5 (0-indexed) means 6th function → jump_table[6] in Julia
+        jump_table[entry_point + 1]
+    end
+
+    println("  [PVM START] Entry point=$entry_point, start_pc=0x$(string(start_pc, base=16)), jump_table_size=$(length(jump_table)), code_length=$(length(instructions))")
+
+    # Validate start_pc is within code
+    if start_pc >= length(instructions)
+        println("ERROR: start_pc=0x$(string(start_pc, base=16)) is beyond code length=$(length(instructions))")
+        return (PANIC, UInt8[], 0, Vector{UInt8}[])
+    end
+
     # initialize state
     state = PVMState(
-        UInt32(0),  # pc starts at 0
+        start_pc,  # pc starts at entry point
         CONTINUE,  # status
         Int64(gas),  # gas
         instructions,  # instructions
@@ -1933,6 +1967,16 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
     while state.gas > 0 && step_count < max_steps
         if state.status == CONTINUE
+            # Trace steps 25-40 to find what triggers error path
+            if step_count >= 25 && step_count < 40
+                if state.pc + 1 <= length(state.instructions)
+                    opcode = state.instructions[state.pc + 1]
+                    r7 = state.registers[8]
+                    r8 = state.registers[9]
+                    r9 = state.registers[10]
+                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16)) op=0x$(string(opcode, base=16, pad=2)) r7=$r7 r8=$r8 r9=$r9")
+                end
+            end
             step!(state)
             step_count += 1
         elseif state.status == HOST

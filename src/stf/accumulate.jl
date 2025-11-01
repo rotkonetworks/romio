@@ -84,24 +84,30 @@ function execute_accumulate(
         return (account, false)
     end
 
-    # Per graypaper: PVM input for accumulate is encode(timeslot, service_id, input_count)
-    # The actual result data is made available via work_package context
+    # Per graypaper: PVM input for accumulate is encode(timeslot, service_id, len(i))
+    # where len(i) is the NUMBER of accumulate inputs (work results), not byte length
     # Encode: timeslot (u32) + service_id (u32) + input_count (u32)
     input = UInt8[]
     # Encode timeslot (little-endian u32)
     append!(input, reinterpret(UInt8, [UInt32(current_slot)]))
     # Encode service_id (little-endian u32)
     append!(input, reinterpret(UInt8, [UInt32(work_result.service_id)]))
-    # Encode input_count (little-endian u32) - we have 1 work result
+    # Encode number of accumulate inputs (u32) - we have 1 work result
     append!(input, reinterpret(UInt8, [UInt32(1)]))
 
-    # Execute PVM with accumulate invocation type
+    println("  [INPUT] bytes: $(bytes2hex(input))")
+    println("    [0-3] timeslot: $(reinterpret(UInt32, input[1:4])[1])")
+    println("    [4-7] service_id: $(reinterpret(UInt32, input[5:8])[1])")
+    println("    [8-11] count: $(reinterpret(UInt32, input[9:12])[1])")
+
+    # Execute PVM with accumulate invocation type (entry point 5 per graypaper)
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
-            context
+            context,
+            5  # Entry point 5 for accumulate invocation
         )
 
         # Check if execution succeeded
@@ -147,6 +153,19 @@ function execute_accumulate(
                 showerror(stdout, exc, bt[1:min(5, length(bt))])
                 println()
             end
+        elseif e isa BoundsError
+            println("      Array: $(typeof(e.a))")
+            println("      Index: $(e.i)")
+            println("      Stacktrace:")
+            for (exc, bt) in Base.catch_stack()
+                showerror(stdout, exc, bt[1:min(10, length(bt))])
+                println()
+            end
+        else
+            println("      Error: $e")
+            println("      Stacktrace:")
+            Base.show_backtrace(stdout, catch_backtrace()[1:min(10, length(catch_backtrace()))])
+            println()
         end
         return (account, false)
     end

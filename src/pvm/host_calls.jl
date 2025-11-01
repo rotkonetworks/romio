@@ -281,6 +281,10 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
     # All host calls cost at least 10 gas (base cost)
     # Additional costs may be added by specific functions
 
+    if call_id > 26
+        println("    [DISPATCH] Unknown host call $call_id - returning WHAT")
+    end
+
     if call_id == GAS
         return host_call_gas(state, context)
     elseif call_id == FETCH
@@ -404,6 +408,8 @@ function host_call_fetch(state, context, invocation_type)
     idx1 = state.registers[12]          # r11
     idx2 = state.registers[13]          # r12
 
+    println("    [FETCH] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
+
     # Determine what data to fetch based on selector
     data = nothing
 
@@ -426,14 +432,39 @@ function host_call_fetch(state, context, invocation_type)
         if context.work_package !== nothing
             data = encode_work_package(context.work_package)
         end
-    # TODO: Implement other selectors (3-6, 8-15) as needed
+    elseif selector == 14
+        # All accumulate inputs (work results) encoded: encode(var(i))
+        if context.work_package !== nothing && haskey(context.work_package, :results)
+            results = context.work_package[:results]
+            # Encode as variable-length sequence
+            data = UInt8[]
+            # Encode length as compact integer (for now, simple u32 little-endian)
+            append!(data, reinterpret(UInt8, [UInt32(length(results))]))
+            # Append each result
+            for result in results
+                append!(data, result)
+            end
+        end
+    elseif selector == 15
+        # Specific accumulate input at index idx1: encode(i[idx1])
+        if context.work_package !== nothing && haskey(context.work_package, :results)
+            results = context.work_package[:results]
+            if idx1 < length(results)
+                # Julia is 1-indexed
+                data = results[idx1 + 1]
+            end
+        end
+    # TODO: Implement other selectors (3-6, 8-13) as needed
     end
 
     # If data is not available, return NONE
     if data === nothing
+        println("    [FETCH] selector=$selector returned NONE (no data available)")
         state.registers[8] = NONE
         return state
     end
+
+    println("    [FETCH] selector=$selector returned $(length(data)) bytes")
 
     # Calculate actual offsets and length
     total_length = length(data)
