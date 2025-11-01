@@ -397,8 +397,8 @@ function decode_offset(state::PVMState, offset::Int, len::Int)
             val = val | sign_bits
         end
     end
-    # Now safely convert to Int32
-    return Int32(Int64(val) & 0xFFFFFFFF)
+    # Convert to Int32 by taking low 32 bits (% gives unchecked truncation) and reinterpreting
+    return reinterpret(Int32, val % UInt32)
 end
 
 function get_register_index(state::PVMState, byte_offset::Int, nibble::Int)
@@ -545,14 +545,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     # store immediate instructions (30-33)
     elseif opcode == 30  # store_imm_u8
-        lx = min(4, state.instructions[state.pc + 2] % 8)
+        lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
         write_u8(state, immx, UInt8(immy % 256))
         
     elseif opcode == 31  # store_imm_u16
-        lx = min(4, state.instructions[state.pc + 2] % 8)
+        lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
@@ -560,7 +560,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         write_bytes(state, immx, [UInt8(val & 0xFF), UInt8(val >> 8)])
         
     elseif opcode == 32  # store_imm_u32
-        lx = min(4, state.instructions[state.pc + 2] % 8)
+        lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
@@ -569,7 +569,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         write_bytes(state, immx, bytes)
         
     elseif opcode == 33  # store_imm_u64
-        lx = min(4, state.instructions[state.pc + 2] % 8)
+        lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
@@ -691,7 +691,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
     # instructions with one register & two immediates (70-73)
     elseif opcode == 70  # store_imm_ind_u8
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
@@ -700,7 +700,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 71  # store_imm_ind_u16
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
@@ -710,7 +710,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 72  # store_imm_ind_u32
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
@@ -721,7 +721,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 73  # store_imm_ind_u64
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
@@ -732,7 +732,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
     # instructions with one register, one immediate and one offset (80-90)
     elseif opcode == 80  # load_imm_jump
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -741,7 +741,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 81  # branch_eq_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -753,7 +753,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 82  # branch_ne_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -765,7 +765,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 83  # branch_lt_u_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -777,7 +777,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 84  # branch_le_u_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -789,7 +789,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 85  # branch_ge_u_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -801,7 +801,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 86  # branch_gt_u_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -822,7 +822,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
 
     elseif opcode == 87  # branch_lt_s_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, Int(lx))
         immy_offset = decode_offset(state, 2 + Int(lx), Int(ly))
@@ -834,7 +834,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 88  # branch_le_s_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -846,7 +846,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 89  # branch_ge_s_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -858,7 +858,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 90  # branch_gt_s_imm
         ra = get_register_index(state, 1, 0)
-        lx = min(4, div(state.instructions[state.pc + 2], 16) % 8)
+        lx = Int(min(4, div(state.instructions[state.pc + 2], 16) % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy_offset = decode_offset(state, 2 + lx, ly)
@@ -1430,7 +1430,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
     elseif opcode == 180  # load_imm_jump_ind
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
-        lx = min(4, state.instructions[state.pc + 3] % 8)
+        lx = Int(min(4, state.instructions[state.pc + 3] % 8))
         ly = min(4, max(0, skip - lx - 2))
         immx = decode_immediate(state, 3, lx)
         immy = decode_immediate(state, 3 + lx, ly)

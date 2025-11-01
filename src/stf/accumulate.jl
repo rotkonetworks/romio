@@ -113,7 +113,19 @@ function execute_accumulate(
         return (updated_account, true)
     catch e
         # PVM exception error
-        println("    ❌ PVM exception: $e")
+        println("    ❌ PVM exception: $(typeof(e))")
+        if e isa MethodError
+            println("      Method: $(e.f)")
+            println("      Args: $(typeof(e.args))")
+        elseif e isa InexactError
+            println("      Function: $(e.func)")
+            println("      Args: $(e.args)")
+            println("      Stacktrace:")
+            for (exc, bt) in Base.catch_stack()
+                showerror(stdout, exc, bt[1:min(5, length(bt))])
+                println()
+            end
+        end
         return (account, false)
     end
 end
