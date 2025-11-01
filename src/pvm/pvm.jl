@@ -1928,19 +1928,16 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     initial_gas = state.gas
     invocation_type = :accumulate  # Set to accumulate for accumulate context
     step_count = 0
+    max_steps = 100000000  # 100M step limit for safety
 
-    while state.gas > 0
+    while state.gas > 0 && step_count < max_steps
         if state.status == CONTINUE
             step!(state)
             step_count += 1
-            if state.status != CONTINUE
-                println("[DEBUG PVM] Status changed to $(state.status) at step $step_count, PC=$(state.pc)")
-            end
         elseif state.status == HOST
             # Save PC before host call
             pc_before = state.pc
 
-            println("[DEBUG PVM] Entering HOST state, host_call_id=$(state.host_call_id)")
             # Handle host call with provided context
             host_call_id = Int(state.host_call_id)
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
@@ -1971,7 +1968,10 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     end
 
     gas_used = initial_gas - max(state.gas, 0)
-    println("[DEBUG PVM] Execution complete: status=$(state.status), steps=$step_count, gas_used=$gas_used")
+    if step_count >= max_steps
+        println("WARNING: PVM hit step limit of $max_steps steps")
+    end
+    println("PVM execution complete: status=$(state.status), steps=$step_count, gas_used=$gas_used")
     return (state.status, output, gas_used, state.exports)
 end
 
@@ -1987,6 +1987,16 @@ function setup_memory!(state::PVMState, input::Vector{UInt8})
         state.memory.access[page + 1] = READ
     end
 
+    # Stack region: below input, grows downward (writable)
+    # Stack starts at SP and can grow down, allocate reasonable stack space
+    stack_top = UInt32(UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT))
+    stack_bottom = stack_top - UInt32(1024 * 1024)  # 1MB stack
+    for page in div(stack_bottom, PAGE_SIZE):div(stack_top, PAGE_SIZE)
+        if page + 1 <= length(state.memory.access)
+            state.memory.access[page + 1] = WRITE
+        end
+    end
+
     # Initialize heap pointer per traces/README.md memory model
     # ro_data: 0x10000 (ZONE_SIZE)
     # rw_data: 0x20000 (2*ZONE_SIZE)
@@ -1997,7 +2007,7 @@ function setup_memory!(state::PVMState, input::Vector{UInt8})
     # Mark initial rw_data area as writable (up to heap start)
     for page in div(rw_data_address, PAGE_SIZE):div(state.memory.current_heap_pointer - 1, PAGE_SIZE)
         if page + 1 <= length(state.memory.access)
-            state.memory.access[page + 1] = :write
+            state.memory.access[page + 1] = WRITE
         end
     end
 
