@@ -283,7 +283,6 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
 
     if call_id == 100
         # Test-only host call - just succeed and return OK
-        println("    [DISPATCH] Test host call 100 - returning OK")
         state.gas -= 10
         if state.gas < 0
             state.status = :oog
@@ -291,8 +290,6 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
         end
         state.registers[8] = 0  # Return OK (0)
         return state
-    elseif call_id > 26
-        println("    [DISPATCH] Unknown host call $call_id - returning WHAT")
     end
 
     if call_id == GAS
@@ -469,7 +466,7 @@ function host_call_fetch(state, context, invocation_type)
 
     # If data is not available, return NONE
     if data === nothing
-        println("    [FETCH] selector=$selector returned NONE (no data available)")
+        println("    [FETCH] selector=$selector returned NONE (no data available) - THIS MIGHT CAUSE SERVICE ERROR!")
         state.registers[8] = NONE
         return state
     end

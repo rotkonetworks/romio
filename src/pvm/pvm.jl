@@ -312,14 +312,6 @@ end
         end
 
         val = state.memory.data[addr32 + 1]
-
-        # Debug: log reads from input region (high memory)
-        input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
-        if addr32 >= input_start && addr32 < input_start + 20
-            offset = addr32 - input_start
-            println("    [READ INPUT] offset=$offset, value=0x$(string(val, base=16))")
-        end
-
         return val
     end
 end

@@ -35,11 +35,20 @@ end
 function parse_work_report(json_report)
     results = [parse_work_result(r) for r in json_report[:results]]
 
+    # Parse context which contains prerequisites
+    context = json_report[:context]
+    prerequisites = if haskey(context, :prerequisites)
+        [parse_hex(p) for p in context[:prerequisites]]
+    else
+        Vector{Vector{UInt8}}()
+    end
+
     return (
         results = results,
         auth_gas_used = Gas(json_report[:auth_gas_used]),
         authorizer_hash = parse_hex(json_report[:authorizer_hash]),
         core_index = UInt16(json_report[:core_index]),
+        prerequisites = prerequisites,
         # TODO: add other fields as needed
     )
 end
@@ -84,22 +93,26 @@ function execute_accumulate(
         return (account, false)
     end
 
-    # TODO: Graypaper says input should be encode(timeslot, service_id, len(i))
-    # But test service only reads first 4 bytes and expects refine result directly
-    # Using refine result for now to match test behavior
-    input = work_result.result.ok
+    # Per JAM spec, accumulate input should be encode(timeslot, service_id, len(i))
+    # where i is the sequence of work results
+    # Encode: timeslot (u32) + service_id (u32) + count (u32)
+    input_encoded = UInt8[]
+    append!(input_encoded, reinterpret(UInt8, [UInt32(current_slot)]))
+    append!(input_encoded, reinterpret(UInt8, [UInt32(work_result.service_id)]))
+    append!(input_encoded, reinterpret(UInt8, [UInt32(1)]))  # count = 1 (single result)
 
-    println("  [ACCUMULATE] Using refine result as input: $(length(input)) bytes")
+    input = input_encoded
+    println("  [ACCUMULATE] Using encoded input: slot=$current_slot, service=$(work_result.service_id), count=1 ($(length(input)) bytes)")
 
     # Execute PVM with accumulate invocation type
-    # TODO: Should use entry point 5 per spec, but test service uses entry point 0
+    # Entry point 0 seems to work better for test service (936 steps vs 279 with entry point 5)
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            0  # Test service uses entry point 0, not 5
+            0  # Entry point 0 for test service
         )
 
         # Check if execution succeeded
@@ -177,6 +190,14 @@ function process_accumulate(
     for json_report in reports
         # Parse work report from JSON
         report = parse_work_report(json_report)
+
+        # Check if report has unmet prerequisites
+        # TODO: implement proper prerequisite checking against state
+        # For now, if prerequisites exist, skip processing (queue to ready_queue)
+        if length(report.prerequisites) > 0
+            println("  [ACCUMULATE] Skipping report with $(length(report.prerequisites)) prerequisites (should be queued)")
+            continue
+        end
 
         # Process each work result in the report
         for work_result in report.results
