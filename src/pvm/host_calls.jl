@@ -282,7 +282,7 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
     # Additional costs may be added by specific functions
 
     if call_id == 100
-        # Test-only host call - just succeed and return OK
+        # Test-only host call - service calls this as error handler
         state.gas -= 10
         if state.gas < 0
             state.status = :oog

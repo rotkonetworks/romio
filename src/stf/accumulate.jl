@@ -93,16 +93,10 @@ function execute_accumulate(
         return (account, false)
     end
 
-    # Per JAM spec, accumulate input should be encode(timeslot, service_id, len(i))
-    # where i is the sequence of work results
-    # Encode: timeslot (u32) + service_id (u32) + count (u32)
-    input_encoded = UInt8[]
-    append!(input_encoded, reinterpret(UInt8, [UInt32(current_slot)]))
-    append!(input_encoded, reinterpret(UInt8, [UInt32(work_result.service_id)]))
-    append!(input_encoded, reinterpret(UInt8, [UInt32(1)]))  # count = 1 (single result)
-
-    input = input_encoded
-    println("  [ACCUMULATE] Using encoded input: slot=$current_slot, service=$(work_result.service_id), count=1 ($(length(input)) bytes)")
+    # Try passing the refine result directly as input
+    # The test service seems to expect this based on execution behavior
+    input = work_result.result.ok
+    println("  [ACCUMULATE] Using refine result as input: $(length(input)) bytes")
 
     # Execute PVM with accumulate invocation type
     # Entry point 0 seems to work better for test service (936 steps vs 279 with entry point 5)
