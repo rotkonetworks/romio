@@ -77,10 +77,22 @@ function execute_accumulate(
         current_slot
     )
 
+    # Build operandtuple for FETCH access
+    # Per graypaper: operandtuple = (package_hash, seg_root, authorizer, payload_hash, gas_limit, auth_trace, result)
+    # The service needs full context to validate authenticity
+    operandtuple_encoded = UInt8[]
+    # TODO: Get these from the work report context - for now use placeholders
+    # append!(operandtuple_encoded, package_hash)  # 32 bytes
+    # append!(operandtuple_encoded, segment_root)  # 32 bytes
+    # append!(operandtuple_encoded, authorizer_hash)  # 32 bytes
+    append!(operandtuple_encoded, work_result.payload_hash)  # 32 bytes
+    append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))  # 8 bytes
+    # append!(operandtuple_encoded, auth_trace)  # variable
+    append!(operandtuple_encoded, work_result.result.ok)  # result blob
+
     # Create work package context for FETCH host call
-    # The service code will fetch the work result via FETCH(selector=7) for work package data
     work_package = Dict{Symbol, Any}(
-        :results => [work_result.result.ok]  # Store the work result for FETCH
+        :results => [operandtuple_encoded]  # Store encoded operandtuple for FETCH
     )
 
     # Create host call context with work package
