@@ -93,13 +93,15 @@ function execute_accumulate(
         return (account, false)
     end
 
-    # Try passing the refine result directly as input
-    # The test service seems to expect this based on execution behavior
+    # Test service uses simplified interface:
+    # - Entry point 0 (not 5 as per full graypaper spec)
+    # - Direct refine result as input (not encoded tuple)
+    # - Work results available via FETCH
     input = work_result.result.ok
-    println("  [ACCUMULATE] Using refine result as input: $(length(input)) bytes")
+    println("  [ACCUMULATE] Input: refine_result ($(length(input)) bytes)")
 
     # Execute PVM with accumulate invocation type
-    # Entry point 0 seems to work better for test service (936 steps vs 279 with entry point 5)
+    # Test service uses entry point 0 for simplicity
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,

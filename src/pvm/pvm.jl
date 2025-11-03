@@ -3,6 +3,10 @@ module PVM
 
 # No external dependencies - using native Julia arrays
 
+# Debug configuration
+include("debug.jl")
+using .PVMDebug
+
 # Include host call interface
 include("host_calls.jl")
 using .HostCalls
@@ -493,7 +497,9 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 0x0A  # ecalli
         imm = decode_immediate(state, 1, min(4, skip))
-        println("    [ECALLI] id=$imm at PC=0x$(string(state.pc, base=16)), r7=$(state.registers[8])")
+        if TRACE_HOST_CALLS
+            println("    [ECALLI] id=$imm at PC=0x$(string(state.pc, base=16)), r7=$(state.registers[8])")
+        end
         if imm == 100
             # Show exactly what bytes we're reading
             bytes_shown = min(10, length(state.instructions) - Int(state.pc))
@@ -1975,7 +1981,9 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
                     r7 = state.registers[8]
                     r8 = state.registers[9]
                     r9 = state.registers[10]
-                    # println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16)) op=0x$(string(opcode, base=16, pad=2)) r7=$r7 r8=$r8 r9=$r9")
+                    if TRACE_EXECUTION
+                        println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16)) op=0x$(string(opcode, base=16, pad=2)) r7=$r7 r8=$r8 r9=$r9")
+                    end
                 end
             end
             step!(state)
