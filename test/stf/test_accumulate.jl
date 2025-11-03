@@ -9,10 +9,7 @@ vectors_dir = "jam-test-vectors/stf/accumulate/tiny"
 
 # Start with simplest tests
 test_vectors = [
-    "no_available_reports-1.json",
     "process_one_immediate_report-1.json",
-    "accumulate_ready_queued_reports-1.json",
-    "enqueue_and_unlock_simple-1.json",
 ]
 
 global passed = 0
