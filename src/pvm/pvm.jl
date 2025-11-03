@@ -1975,7 +1975,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
                     r7 = state.registers[8]
                     r8 = state.registers[9]
                     r9 = state.registers[10]
-                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16)) op=0x$(string(opcode, base=16, pad=2)) r7=$r7 r8=$r8 r9=$r9")
+                    # println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16)) op=0x$(string(opcode, base=16, pad=2)) r7=$r7 r8=$r8 r9=$r9")
                 end
             end
             step!(state)

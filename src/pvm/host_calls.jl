@@ -415,7 +415,7 @@ function host_call_fetch(state, context, invocation_type)
     idx1 = state.registers[12]          # r11
     idx2 = state.registers[13]          # r12
 
-    println("    [FETCH] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
+    # println("    [FETCH] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
 
     # Determine what data to fetch based on selector
     data = nothing
@@ -471,7 +471,7 @@ function host_call_fetch(state, context, invocation_type)
         return state
     end
 
-    println("    [FETCH] selector=$selector returned $(length(data)) bytes")
+    # println("    [FETCH] selector=$selector returned $(length(data)) bytes")
 
     # Calculate actual offsets and length
     total_length = length(data)

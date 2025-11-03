@@ -180,7 +180,56 @@ function process_accumulate(
     # Start with current state
     new_accounts = copy(state.accounts)
 
-    # Process each work report
+    # Process ready_queue items with no dependencies
+    # Ready queue contains work reports that were previously queued due to unmet prerequisites
+    for queued_item in state.ready_queue
+        if queued_item === nothing
+            # Empty slot in ring buffer
+            continue
+        end
+
+        # Check if this item has dependencies
+        dependencies = if haskey(queued_item, :dependencies) && queued_item[:dependencies] !== nothing
+            queued_item[:dependencies]
+        else
+            []
+        end
+
+        # Skip if item still has unmet dependencies
+        # TODO: implement proper dependency resolution
+        if length(dependencies) > 0
+            continue
+        end
+
+        # Process the queued report
+        queued_report = queued_item[:report]
+
+        # Process each work result in the queued report
+        for json_result in queued_report[:results]
+            work_result = parse_work_result(json_result)
+
+            # Get service account
+            if !haskey(new_accounts, work_result.service_id)
+                continue
+            end
+
+            account = new_accounts[work_result.service_id]
+
+            # Verify code hash matches
+            if account.code_hash != work_result.code_hash
+                continue
+            end
+
+            # Execute PVM accumulate invocation
+            println("  [ACCUMULATE] Processing queued work for service $(work_result.service_id)")
+            updated_account, success = execute_accumulate(work_result, account, state, slot)
+            if success
+                new_accounts[work_result.service_id] = updated_account
+            end
+        end
+    end
+
+    # Process each incoming work report
     for json_report in reports
         # Parse work report from JSON
         report = parse_work_report(json_report)

@@ -204,7 +204,24 @@ function load_state_from_json(json_data)::State
         )
     end
 
-    # TODO: Parse other state fields (accumulated, ready_queue, statistics, etc.)
+    # Parse ready_queue
+    # Ready queue is a ring buffer of work reports with their dependencies
+    # Format: array of [report_entry] or [] for empty slots
+    # Where report_entry = {report: {...}, dependencies: [hashes]}
+    ready_queue = Vector{Any}()
+    if haskey(json_data, :ready_queue)
+        for item in json_data[:ready_queue]
+            if length(item) > 0
+                # Non-empty slot: has report and dependencies
+                push!(ready_queue, item[1])  # Store the report entry
+            else
+                # Empty slot
+                push!(ready_queue, nothing)
+            end
+        end
+    end
+
+    # TODO: Parse other state fields (accumulated, statistics, etc.)
 
     return State(
         slot,
@@ -212,7 +229,7 @@ function load_state_from_json(json_data)::State
         accounts,
         privileges,
         Dict{ServiceId, Vector{UInt8}}(),  # accumulated (placeholder)
-        Vector{Any}(),  # ready_queue (placeholder)
+        ready_queue,  # parsed ready_queue
         Vector{Any}(),  # statistics (placeholder)
         Vector{Any}(),  # validators (placeholder)
         UInt32(0),      # epoch
