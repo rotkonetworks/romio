@@ -1893,7 +1893,16 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
                 # Advance PC past ecalli instruction
                 # ecalli format: opcode (1 byte) + immediate (skip bytes)
                 skip = skip_distance(state.opcode_mask, pc_before + 1)
-                state.pc = pc_before + 1 + skip
+                new_pc = pc_before + 1 + skip
+                if host_call_id == 100
+                    println("      [PC ADVANCE] pc_before=0x$(string(pc_before, base=16)), skip=$skip, new_pc=0x$(string(new_pc, base=16))")
+                    if new_pc < length(state.instructions)
+                        println("      [NEXT INSTR] opcode at new_pc: 0x$(string(state.instructions[new_pc + 1], base=16))")
+                    else
+                        println("      [NEXT INSTR] new_pc beyond code! code_len=$(length(state.instructions))")
+                    end
+                end
+                state.pc = new_pc
             end
         else
             # HALT, PANIC, OOG, FAULT - stop execution
@@ -1973,6 +1982,14 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     max_steps = 100000000  # 100M step limit for safety
 
     while state.gas > 0 && step_count < max_steps
+        if step_count >= 930 && step_count <= 940
+            if state.pc + 1 <= length(state.instructions)
+                opcode = state.instructions[state.pc + 1]
+                println("      [LOOP START] step=$step_count, status=$(state.status), PC=0x$(string(state.pc, base=16)), opcode=0x$(string(opcode, base=16))")
+            else
+                println("      [LOOP START] step=$step_count, status=$(state.status), PC=0x$(string(state.pc, base=16)) BEYOND CODE")
+            end
+        end
         if state.status == CONTINUE
             # Trace steps 25-40 to find what triggers error path
             if step_count >= 25 && step_count < 40
@@ -1994,18 +2011,40 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
             # Handle host call with provided context
             host_call_id = Int(state.host_call_id)
+            if host_call_id == 100
+                println("      [BEFORE DISPATCH] status=$(state.status)")
+            end
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
+            if host_call_id == 100
+                println("      [AFTER DISPATCH] status=$(state.status)")
+            end
 
             # Resume execution if no error
             if state.status == HOST
                 state.status = CONTINUE
                 # Advance PC past ecalli instruction
                 skip = skip_distance(state.opcode_mask, pc_before + 1)
-                state.pc = pc_before + 1 + skip
+                new_pc = pc_before + 1 + skip
+                if host_call_id == 100
+                    println("      [PC ADVANCE] pc_before=0x$(string(pc_before, base=16)), skip=$skip, new_pc=0x$(string(new_pc, base=16))")
+                    if new_pc < length(state.instructions)
+                        println("      [NEXT INSTR] opcode at new_pc: 0x$(string(state.instructions[new_pc + 1], base=16))")
+                    else
+                        println("      [NEXT INSTR] new_pc beyond code! code_len=$(length(state.instructions))")
+                    end
+                end
+                state.pc = new_pc
             end
         else
             # HALT, PANIC, OOG, FAULT - stop execution
+            if step_count == 936
+                println("      [BREAK AT 936] status=$(state.status)")
+            end
             break
+        end
+
+        if step_count == 936
+            println("      [END OF ITERATION 936] status=$(state.status), gas=$(state.gas)")
         end
     end
 
