@@ -6,7 +6,7 @@ include("../types/accumulate.jl")
 include("../test_vectors/loader.jl")
 include("../test_vectors/comparison.jl")
 include("../pvm/pvm.jl")
-include("../encoding/scale.jl")
+include("../encoding/jam.jl")
 using .PVM
 
 # Parse work result from JSON
@@ -105,11 +105,20 @@ function execute_accumulate(
     # gas_limit (8 bytes, little-endian u64) - from work_result
     append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))
 
-    # auth_trace (SCALE-encoded blob: compact length + data) - TODO: get from work_report if available
-    append!(operandtuple_encoded, encode_blob(UInt8[]))  # empty for now
+    # auth_trace (JAM-encoded blob: var(x) = len + data) - TODO: get from work_report if available
+    append!(operandtuple_encoded, encode_jam_blob(UInt8[]))  # empty for now
 
-    # result (SCALE-encoded blob: compact length + data) - from work_result
-    append!(operandtuple_encoded, encode_blob(work_result.result.ok))
+    # result (JAM-encoded blob: var(x) = len + data) - from work_result
+    append!(operandtuple_encoded, encode_jam_blob(work_result.result.ok))
+
+    println("  [ACCUMULATE] Operandtuple ($(length(operandtuple_encoded)) bytes): $(bytes2hex(operandtuple_encoded))")
+    println("    package_hash: $(bytes2hex(work_report.package_hash))")
+    println("    seg_root: $(bytes2hex(work_report.seg_root))")
+    println("    authorizer: $(bytes2hex(work_report.authorizer_hash))")
+    println("    payload_hash: $(bytes2hex(work_result.payload_hash))")
+    println("    gas_limit: $(work_result.accumulate_gas)")
+    println("    auth_trace: (empty)")
+    println("    result: $(bytes2hex(work_result.result.ok))")
 
     # Create work package context for FETCH host call
     work_package = Dict{Symbol, Any}(
@@ -127,31 +136,27 @@ function execute_accumulate(
     end
 
     # Per graypaper spec (line 163 of pvm_invocations.tex):
-    # Entry point 5 with input = encode(timeslot, service_id, count)
+    # Entry point with input = encode(timeslot, service_id, count)
     # Operand tuples are accessed via FETCH host call
 
-    # Encode input as (timeslot, service_id, count)
-    # timeslot: UInt32 (4 bytes)
-    # service_id: UInt32 (4 bytes)
-    # count: UInt64 (8 bytes) - number of items (operand tuples + deferred transfers)
+    # Try JAM encoding for input fields
     input = UInt8[]
-    append!(input, reinterpret(UInt8, [UInt32(current_slot)]))  # timeslot (4 bytes)
-    append!(input, reinterpret(UInt8, [UInt32(work_result.service_id)]))  # service_id (4 bytes)
-    append!(input, reinterpret(UInt8, [UInt64(1)]))  # count = 1 (1 operand tuple)
+    append!(input, encode_jam_compact(current_slot))  # timeslot (JAM compact)
+    append!(input, encode_jam_compact(work_result.service_id))  # service_id (JAM compact)
+    append!(input, encode_jam_compact(1))  # count = 1 (JAM compact)
 
     println("  [ACCUMULATE] Input: encode(timeslot=$current_slot, service_id=$(work_result.service_id), count=1)")
     println("  [ACCUMULATE] Input hex: $(bytes2hex(input))")
 
     # Execute PVM with accumulate invocation type
-    # NOTE: Test vectors may use different entry point than graypaper spec
-    # Trying entry point 0 (test service simplified interface)
+    # Test vectors use entry point 0 (test service interface), not graypaper entry point 5
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            0  # Entry point 0 for test service
+            0  # Entry point 0 for test service (gets further than entry point 5)
         )
 
         # Check if execution succeeded

@@ -416,7 +416,8 @@ function host_call_fetch(state, context, invocation_type)
     idx1 = state.registers[12]          # r11
     idx2 = state.registers[13]          # r12
 
-    # println("    [FETCH] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
+    step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
+    println("    [FETCH step=$step] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
 
     # Determine what data to fetch based on selector
     data = nothing
@@ -424,6 +425,7 @@ function host_call_fetch(state, context, invocation_type)
     if selector == 0
         # Configuration constants (from tiny chainspec)
         data = encode_config_constants()
+        println("    [FETCH] selector=0 (config) returned $(length(data)) bytes")
     elseif selector == 1
         # Entropy/timeslot hash (n)
         if context.entropy !== nothing
@@ -444,22 +446,28 @@ function host_call_fetch(state, context, invocation_type)
         # All accumulate inputs (work results) encoded: encode(var(i))
         if context.work_package !== nothing && haskey(context.work_package, :results)
             results = context.work_package[:results]
-            # Encode as variable-length sequence
+            # Encode as JAM sequence: JAM compact length + items
+            include("../encoding/jam.jl")
             data = UInt8[]
-            # Encode length as compact integer (for now, simple u32 little-endian)
-            append!(data, reinterpret(UInt8, [UInt32(length(results))]))
-            # Append each result
+            # Encode length as JAM compact integer
+            append!(data, encode_jam_compact(length(results)))
+            # Append each result (each is already JAM-encoded operandtuple)
             for result in results
-                append!(data, result)
+                # Each result is a blob, encode with JAM var(x) = len + data
+                append!(data, encode_jam_blob(result))
             end
+            println("    [FETCH] selector=14 (all inputs) returned $(length(results)) items, $(length(data)) bytes total")
         end
     elseif selector == 15
         # Specific accumulate input at index idx1: encode(i[idx1])
         if context.work_package !== nothing && haskey(context.work_package, :results)
             results = context.work_package[:results]
             if idx1 < length(results)
-                # Julia is 1-indexed
+                # Julia is 1-indexed, return the raw operandtuple (already JAM-encoded)
                 data = results[idx1 + 1]
+                println("    [FETCH] selector=15 (input[$idx1]) returned $(length(data)) bytes")
+            else
+                println("    [FETCH] selector=15 (input[$idx1]) OUT OF BOUNDS (have $(length(results)) items)")
             end
         end
     # TODO: Implement other selectors (3-6, 8-13) as needed
