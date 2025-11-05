@@ -79,16 +79,29 @@ function execute_accumulate(
 
     # Build operandtuple for FETCH access
     # Per graypaper: operandtuple = (package_hash, seg_root, authorizer, payload_hash, gas_limit, auth_trace, result)
-    # The service needs full context to validate authenticity
+    # The service validates ALL fields must be present
     operandtuple_encoded = UInt8[]
-    # TODO: Get these from the work report context - for now use placeholders
-    # append!(operandtuple_encoded, package_hash)  # 32 bytes
-    # append!(operandtuple_encoded, segment_root)  # 32 bytes
-    # append!(operandtuple_encoded, authorizer_hash)  # 32 bytes
-    append!(operandtuple_encoded, work_result.payload_hash)  # 32 bytes
-    append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))  # 8 bytes
-    # append!(operandtuple_encoded, auth_trace)  # variable
-    append!(operandtuple_encoded, work_result.result.ok)  # result blob
+
+    # package_hash (32 bytes) - use zero hash as placeholder for now
+    append!(operandtuple_encoded, zeros(UInt8, 32))
+
+    # seg_root (32 bytes) - use zero hash as placeholder
+    append!(operandtuple_encoded, zeros(UInt8, 32))
+
+    # authorizer (32 bytes) - use zero hash as placeholder
+    append!(operandtuple_encoded, zeros(UInt8, 32))
+
+    # payload_hash (32 bytes)
+    append!(operandtuple_encoded, work_result.payload_hash)
+
+    # gas_limit (8 bytes)
+    append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))
+
+    # auth_trace (variable length) - empty for now
+    # (no append means length 0)
+
+    # result (variable length)
+    append!(operandtuple_encoded, work_result.result.ok)
 
     # Create work package context for FETCH host call
     work_package = Dict{Symbol, Any}(
@@ -116,7 +129,7 @@ function execute_accumulate(
     input = UInt8[]
     append!(input, reinterpret(UInt8, [UInt32(current_slot)]))  # timeslot (4 bytes)
     append!(input, reinterpret(UInt8, [UInt32(work_result.service_id)]))  # service_id (4 bytes)
-    append!(input, reinterpret(UInt8, [UInt64(1)]))  # count = 1 operand tuple (8 bytes)
+    append!(input, reinterpret(UInt8, [UInt64(1)]))  # count = 1 (1 operand tuple)
 
     println("  [ACCUMULATE] Input: encode(timeslot=$current_slot, service_id=$(work_result.service_id), count=1)")
     println("  [ACCUMULATE] Input hex: $(bytes2hex(input))")

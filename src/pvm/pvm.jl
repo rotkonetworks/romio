@@ -630,10 +630,11 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         val = UInt64(read_u8(state, immx))
-        # Log heap memory loads during critical window
-        if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
-            if immx >= 0xFF100000
-                println("    [LOAD_U8] step=$(get(task_local_storage(), :pvm_step_count, 0)) addr=0x$(string(immx, base=16, pad=8)) value=$val")
+        # Log input buffer reads
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if step >= 1 && step < 30
+            if immx >= 0xfef00000  # Input buffer region
+                println("    [LOAD_U8] step=$step addr=0x$(string(immx, base=16, pad=8)) value=$val")
             end
         end
         state.registers[ra + 1] = val
@@ -666,10 +667,11 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         immx = decode_immediate(state, 2, lx)
         bytes = read_bytes(state, immx, 4)
         val = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
-        # Log heap memory loads during critical window
-        if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
-            if immx >= 0xFF100000
-                println("    [LOAD_U32] step=$(get(task_local_storage(), :pvm_step_count, 0)) addr=0x$(string(immx, base=16, pad=8)) value=$val")
+        # Log input buffer reads
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if step >= 1 && step < 30
+            if immx >= 0xfef00000  # Input buffer region
+                println("    [LOAD_U32] step=$step addr=0x$(string(immx, base=16, pad=8)) value=$val")
             end
         end
         state.registers[ra + 1] = val
@@ -2022,15 +2024,16 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
             end
         end
         if state.status == CONTINUE
-            # Trace steps leading up to error
-            if step_count >= 260 && step_count < 280
+            # Trace first steps and steps near error
+            if (step_count >= 0 && step_count < 5) || (step_count >= 260 && step_count < 280)
                 if state.pc + 1 <= length(state.instructions)
                     opcode = state.instructions[state.pc + 1]
-                    r1 = state.registers[2]
-                    r7 = state.registers[8]
-                    r8 = state.registers[9]
-                    r10 = state.registers[11]
-                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r7=$r7 r8=$r8 r10=$r10")
+                    r1 = state.registers[2]  # SP
+                    r7 = state.registers[8]  # a0
+                    r8 = state.registers[9]  # a1
+                    r9 = state.registers[10]  # a2
+                    r10 = state.registers[11]  # a3
+                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r7=$r7 r8=$r8 r9=$r9 r10=$r10")
                 end
             end
             step!(state)
