@@ -105,22 +105,31 @@ function execute_accumulate(
         return (account, false)
     end
 
-    # Test service uses simplified interface:
-    # - Entry point 0 (not 5 as per full graypaper spec)
-    # - Direct refine result as input (not encoded tuple)
-    # - Work results available via FETCH
-    input = work_result.result.ok
-    println("  [ACCUMULATE] Input: refine_result ($(length(input)) bytes)")
+    # Per graypaper spec (line 163 of pvm_invocations.tex):
+    # Entry point 5 with input = encode(timeslot, service_id, count)
+    # Operand tuples are accessed via FETCH host call
+
+    # Encode input as (timeslot, service_id, count)
+    # timeslot: UInt32 (4 bytes)
+    # service_id: UInt32 (4 bytes)
+    # count: UInt64 (8 bytes) - number of items (operand tuples + deferred transfers)
+    input = UInt8[]
+    append!(input, reinterpret(UInt8, [UInt32(current_slot)]))  # timeslot (4 bytes)
+    append!(input, reinterpret(UInt8, [UInt32(work_result.service_id)]))  # service_id (4 bytes)
+    append!(input, reinterpret(UInt8, [UInt64(1)]))  # count = 1 operand tuple (8 bytes)
+
+    println("  [ACCUMULATE] Input: encode(timeslot=$current_slot, service_id=$(work_result.service_id), count=1)")
+    println("  [ACCUMULATE] Input hex: $(bytes2hex(input))")
 
     # Execute PVM with accumulate invocation type
-    # Test service uses entry point 0 for simplicity
+    # Per graypaper: entry point 5 for accumulate
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            0  # Entry point 0 for test service
+            5  # Entry point 5 per graypaper spec
         )
 
         # Check if execution succeeded

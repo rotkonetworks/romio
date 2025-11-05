@@ -629,7 +629,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        state.registers[ra + 1] = UInt64(read_u8(state, immx))
+        val = UInt64(read_u8(state, immx))
+        # Log heap memory loads during critical window
+        if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
+            if immx >= 0xFF100000
+                println("    [LOAD_U8] step=$(get(task_local_storage(), :pvm_step_count, 0)) addr=0x$(string(immx, base=16, pad=8)) value=$val")
+            end
+        end
+        state.registers[ra + 1] = val
         
     elseif opcode == 53  # load_i8
         ra = get_register_index(state, 1, 0)
@@ -658,7 +665,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         bytes = read_bytes(state, immx, 4)
-        state.registers[ra + 1] = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
+        val = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
+        # Log heap memory loads during critical window
+        if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
+            if immx >= 0xFF100000
+                println("    [LOAD_U32] step=$(get(task_local_storage(), :pvm_step_count, 0)) addr=0x$(string(immx, base=16, pad=8)) value=$val")
+            end
+        end
+        state.registers[ra + 1] = val
         
     elseif opcode == 57  # load_i32
         ra = get_register_index(state, 1, 0)
@@ -1127,8 +1141,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, state.registers[rb + 1] + immx, 4)
-        state.registers[ra + 1] = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
+        addr = state.registers[rb + 1] + immx
+        bytes = read_bytes(state, addr, 4)
+        val = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
+        # Log indirect loads during critical window
+        if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
+            println("    [LOAD_IND_U32] step=$(get(task_local_storage(), :pvm_step_count, 0)) rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
+        end
+        state.registers[ra + 1] = val
         
     elseif opcode == 129  # load_ind_i32
         ra = get_register_index(state, 1, 0)
@@ -1144,10 +1164,16 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, state.registers[rb + 1] + immx, 8)
+        addr = state.registers[rb + 1] + immx
+        bytes = read_bytes(state, addr, 8)
         # If read failed (returned fewer than 8 bytes), register not updated and status already set
         if length(bytes) == 8
-            state.registers[ra + 1] = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
+            val = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
+            # Log indirect loads during critical window
+            if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
+                println("    [LOAD_IND_U64] step=$(get(task_local_storage(), :pvm_step_count, 0)) rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
+            end
+            state.registers[ra + 1] = val
         end
         
     elseif opcode == 131  # add_imm_32
@@ -1982,6 +2008,9 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     max_steps = 100000000  # 100M step limit for safety
 
     while state.gas > 0 && step_count < max_steps
+        # Store step count for debug logging
+        task_local_storage(:pvm_step_count, step_count)
+
         if step_count >= 930 && step_count <= 940
             if state.pc + 1 <= length(state.instructions)
                 opcode = state.instructions[state.pc + 1]
@@ -1991,16 +2020,23 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
             end
         end
         if state.status == CONTINUE
-            # Trace steps 25-40 to find what triggers error path
-            if step_count >= 25 && step_count < 40
+            # Trace steps leading up to ecalli 100 (which happens around step 705)
+            if step_count >= 650 && step_count < 710
                 if state.pc + 1 <= length(state.instructions)
                     opcode = state.instructions[state.pc + 1]
+                    r1 = state.registers[2]
+                    r2 = state.registers[3]
+                    r3 = state.registers[4]
+                    r4 = state.registers[5]
+                    r5 = state.registers[6]
+                    r6 = state.registers[7]
                     r7 = state.registers[8]
                     r8 = state.registers[9]
                     r9 = state.registers[10]
-                    if TRACE_EXECUTION
-                        println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16)) op=0x$(string(opcode, base=16, pad=2)) r7=$r7 r8=$r8 r9=$r9")
-                    end
+                    r10 = state.registers[11]
+                    r11 = state.registers[12]
+                    r12 = state.registers[13]
+                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r2=$r2 r3=$r3 r4=$r4 r5=$r5 r6=$r6 r7=$r7 r11=$r11 r12=$r12")
                 end
             end
             step!(state)
