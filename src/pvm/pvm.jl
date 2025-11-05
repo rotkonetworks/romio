@@ -2044,12 +2044,13 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
             # Handle host call with provided context
             host_call_id = Int(state.host_call_id)
-            if step_count > 280
-                println("      [HOST CALL] step=$step_count, id=$host_call_id, PC=0x$(string(pc_before, base=16)), r7=$(state.registers[8]), r8=$(state.registers[9]), r10=$(state.registers[11])")
+            # Log ALL host calls to catch any failures
+            if host_call_id != 1  # Skip FETCH logging (already logged separately)
+                println("      [HOST CALL] step=$step_count, id=$host_call_id, PC=0x$(string(pc_before, base=16)), r7=$(state.registers[8]), r8=$(state.registers[9]), r9=$(state.registers[10]), r10=$(state.registers[11])")
             end
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
-            if step_count > 280 && host_call_id == 100
-                println("      [HOST CALL 100 AFTER] status=$(state.status), r8=$(state.registers[8])")
+            if host_call_id != 1
+                println("      [HOST CALL AFTER] step=$step_count, id=$host_call_id, status=$(state.status), r8=$(state.registers[8])")
             end
 
             # Resume execution if no error

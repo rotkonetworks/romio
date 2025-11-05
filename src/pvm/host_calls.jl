@@ -417,9 +417,8 @@ function host_call_fetch(state, context, invocation_type)
     idx2 = state.registers[13]          # r12
 
     step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
-    if step > 280 || selector != 0
-        println("    [FETCH step=$step] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
-    end
+    # Log all FETCH calls to see what service is requesting
+    println("    [FETCH step=$step] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
 
     # Determine what data to fetch based on selector
     data = nothing

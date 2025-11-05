@@ -105,11 +105,11 @@ function execute_accumulate(
     # gas_limit (8 bytes, little-endian u64) - from work_result
     append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))
 
-    # auth_trace (JAM-encoded blob: var(x) = len + data) - TODO: get from work_report if available
-    append!(operandtuple_encoded, encode_jam_blob(UInt8[]))  # empty for now
+    # auth_trace (raw blob, maybe not JAM-encoded?) - TODO: get from work_report if available
+    append!(operandtuple_encoded, UInt8[])  # empty for now
 
-    # result (JAM-encoded blob: var(x) = len + data) - from work_result
-    append!(operandtuple_encoded, encode_jam_blob(work_result.result.ok))
+    # result (raw blob, maybe not JAM-encoded?) - from work_result
+    append!(operandtuple_encoded, work_result.result.ok)
 
     println("  [ACCUMULATE] Operandtuple ($(length(operandtuple_encoded)) bytes): $(bytes2hex(operandtuple_encoded))")
     println("    package_hash: $(bytes2hex(work_report.package_hash))")
@@ -139,7 +139,7 @@ function execute_accumulate(
     # Entry point with input = encode(timeslot, service_id, count)
     # Operand tuples are accessed via FETCH host call
 
-    # Try JAM encoding for input fields
+    # JAM encoding gets further (845 steps vs 763 with raw LE)
     input = UInt8[]
     append!(input, encode_jam_compact(current_slot))  # timeslot (JAM compact)
     append!(input, encode_jam_compact(work_result.service_id))  # service_id (JAM compact)
@@ -147,6 +147,7 @@ function execute_accumulate(
 
     println("  [ACCUMULATE] Input: encode(timeslot=$current_slot, service_id=$(work_result.service_id), count=1)")
     println("  [ACCUMULATE] Input hex: $(bytes2hex(input))")
+    println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
 
     # Execute PVM with accumulate invocation type
     # Test vectors use entry point 0 (test interface) which gets further
