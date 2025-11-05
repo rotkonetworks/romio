@@ -417,7 +417,9 @@ function host_call_fetch(state, context, invocation_type)
     idx2 = state.registers[13]          # r12
 
     step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
-    println("    [FETCH step=$step] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
+    if step > 280 || selector != 0
+        println("    [FETCH step=$step] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
+    end
 
     # Determine what data to fetch based on selector
     data = nothing
@@ -475,7 +477,8 @@ function host_call_fetch(state, context, invocation_type)
 
     # If data is not available, return NONE
     if data === nothing
-        println("    [FETCH] selector=$selector returned NONE (no data available) - THIS MIGHT CAUSE SERVICE ERROR!")
+        step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
+        println("    [FETCH step=$step] selector=$selector returned NONE (no data available) - SERVICE WILL LIKELY ERROR!")
         state.registers[8] = NONE
         return state
     end

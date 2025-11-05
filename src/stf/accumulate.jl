@@ -143,20 +143,20 @@ function execute_accumulate(
     input = UInt8[]
     append!(input, encode_jam_compact(current_slot))  # timeslot (JAM compact)
     append!(input, encode_jam_compact(work_result.service_id))  # service_id (JAM compact)
-    append!(input, encode_jam_compact(1))  # count = 1 (JAM compact)
+    append!(input, encode_jam_compact(1))  # count = 1 (1 operand tuple)
 
     println("  [ACCUMULATE] Input: encode(timeslot=$current_slot, service_id=$(work_result.service_id), count=1)")
     println("  [ACCUMULATE] Input hex: $(bytes2hex(input))")
 
     # Execute PVM with accumulate invocation type
-    # Test vectors use entry point 0 (test service interface), not graypaper entry point 5
+    # Test vectors use entry point 0 (test interface) which gets further
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            0  # Entry point 0 for test service (gets further than entry point 5)
+            0  # Entry point 0 for test service
         )
 
         # Check if execution succeeded

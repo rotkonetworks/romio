@@ -2025,7 +2025,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         end
         if state.status == CONTINUE
             # Trace first steps and steps near error
-            if (step_count >= 0 && step_count < 5) || (step_count >= 260 && step_count < 280)
+            if (step_count >= 0 && step_count < 5) || (step_count >= 260 && step_count < 280) || (step_count >= 840 && step_count < 850)
                 if state.pc + 1 <= length(state.instructions)
                     opcode = state.instructions[state.pc + 1]
                     r1 = state.registers[2]  # SP
@@ -2044,12 +2044,12 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
             # Handle host call with provided context
             host_call_id = Int(state.host_call_id)
-            if host_call_id == 100
-                println("      [BEFORE DISPATCH] status=$(state.status)")
+            if step_count > 280
+                println("      [HOST CALL] step=$step_count, id=$host_call_id, PC=0x$(string(pc_before, base=16)), r7=$(state.registers[8]), r8=$(state.registers[9]), r10=$(state.registers[11])")
             end
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
-            if host_call_id == 100
-                println("      [AFTER DISPATCH] status=$(state.status)")
+            if step_count > 280 && host_call_id == 100
+                println("      [HOST CALL 100 AFTER] status=$(state.status), r8=$(state.registers[8])")
             end
 
             # Resume execution if no error
