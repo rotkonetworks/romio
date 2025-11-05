@@ -1144,9 +1144,10 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         addr = state.registers[rb + 1] + immx
         bytes = read_bytes(state, addr, 4)
         val = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
-        # Log indirect loads during critical window
-        if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
-            println("    [LOAD_IND_U32] step=$(get(task_local_storage(), :pvm_step_count, 0)) rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
+        # Log indirect loads near error
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if (step >= 1 && step < 50) || (step >= 260 && step < 280)
+            println("    [LOAD_IND_U32] step=$step rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
         end
         state.registers[ra + 1] = val
         
@@ -1169,9 +1170,10 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         # If read failed (returned fewer than 8 bytes), register not updated and status already set
         if length(bytes) == 8
             val = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
-            # Log indirect loads during critical window
-            if get(task_local_storage(), :pvm_step_count, 0) >= 650 && get(task_local_storage(), :pvm_step_count, 0) < 710
-                println("    [LOAD_IND_U64] step=$(get(task_local_storage(), :pvm_step_count, 0)) rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
+            # Log indirect loads near error
+            step = get(task_local_storage(), :pvm_step_count, 0)
+            if (step >= 1 && step < 50) || (step >= 260 && step < 280)
+                println("    [LOAD_IND_U64] step=$step rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
             end
             state.registers[ra + 1] = val
         end
@@ -2020,23 +2022,15 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
             end
         end
         if state.status == CONTINUE
-            # Trace steps leading up to ecalli 100 (which happens around step 705)
-            if step_count >= 650 && step_count < 710
+            # Trace steps leading up to error
+            if step_count >= 260 && step_count < 280
                 if state.pc + 1 <= length(state.instructions)
                     opcode = state.instructions[state.pc + 1]
                     r1 = state.registers[2]
-                    r2 = state.registers[3]
-                    r3 = state.registers[4]
-                    r4 = state.registers[5]
-                    r5 = state.registers[6]
-                    r6 = state.registers[7]
                     r7 = state.registers[8]
                     r8 = state.registers[9]
-                    r9 = state.registers[10]
                     r10 = state.registers[11]
-                    r11 = state.registers[12]
-                    r12 = state.registers[13]
-                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r2=$r2 r3=$r3 r4=$r4 r5=$r5 r6=$r6 r7=$r7 r11=$r11 r12=$r12")
+                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r7=$r7 r8=$r8 r10=$r10")
                 end
             end
             step!(state)
