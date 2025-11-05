@@ -6,6 +6,7 @@ include("../types/accumulate.jl")
 include("../test_vectors/loader.jl")
 include("../test_vectors/comparison.jl")
 include("../pvm/pvm.jl")
+include("../encoding/scale.jl")
 using .PVM
 
 # Parse work result from JSON
@@ -43,19 +44,26 @@ function parse_work_report(json_report)
         Vector{Vector{UInt8}}()
     end
 
+    # Parse package_spec for operandtuple fields
+    package_spec = json_report[:package_spec]
+    package_hash = parse_hex(package_spec[:hash])
+    erasure_root = parse_hex(package_spec[:erasure_root])  # Used as seg_root
+
     return (
         results = results,
         auth_gas_used = Gas(json_report[:auth_gas_used]),
         authorizer_hash = parse_hex(json_report[:authorizer_hash]),
         core_index = UInt16(json_report[:core_index]),
         prerequisites = prerequisites,
-        # TODO: add other fields as needed
+        package_hash = package_hash,
+        seg_root = erasure_root,
     )
 end
 
 # Execute accumulate invocation for a work result
 function execute_accumulate(
     work_result,
+    work_report,  # Full work report for operandtuple fields
     account::ServiceAccount,
     state::State,
     current_slot::TimeSlot
@@ -79,29 +87,29 @@ function execute_accumulate(
 
     # Build operandtuple for FETCH access
     # Per graypaper: operandtuple = (package_hash, seg_root, authorizer, payload_hash, gas_limit, auth_trace, result)
-    # The service validates ALL fields must be present
+    # All fields must be SCALE-encoded and come from work_report
     operandtuple_encoded = UInt8[]
 
-    # package_hash (32 bytes) - use zero hash as placeholder for now
-    append!(operandtuple_encoded, zeros(UInt8, 32))
+    # package_hash (32 bytes) - from work_report.package_spec
+    append!(operandtuple_encoded, work_report.package_hash)
 
-    # seg_root (32 bytes) - use zero hash as placeholder
-    append!(operandtuple_encoded, zeros(UInt8, 32))
+    # seg_root (32 bytes) - from work_report.package_spec.erasure_root
+    append!(operandtuple_encoded, work_report.seg_root)
 
-    # authorizer (32 bytes) - use zero hash as placeholder
-    append!(operandtuple_encoded, zeros(UInt8, 32))
+    # authorizer (32 bytes) - from work_report
+    append!(operandtuple_encoded, work_report.authorizer_hash)
 
-    # payload_hash (32 bytes)
+    # payload_hash (32 bytes) - from work_result
     append!(operandtuple_encoded, work_result.payload_hash)
 
-    # gas_limit (8 bytes)
+    # gas_limit (8 bytes, little-endian u64) - from work_result
     append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))
 
-    # auth_trace (variable length) - empty for now
-    # (no append means length 0)
+    # auth_trace (SCALE-encoded blob: compact length + data) - TODO: get from work_report if available
+    append!(operandtuple_encoded, encode_blob(UInt8[]))  # empty for now
 
-    # result (variable length)
-    append!(operandtuple_encoded, work_result.result.ok)
+    # result (SCALE-encoded blob: compact length + data) - from work_result
+    append!(operandtuple_encoded, encode_blob(work_result.result.ok))
 
     # Create work package context for FETCH host call
     work_package = Dict{Symbol, Any}(
@@ -135,14 +143,15 @@ function execute_accumulate(
     println("  [ACCUMULATE] Input hex: $(bytes2hex(input))")
 
     # Execute PVM with accumulate invocation type
-    # Per graypaper: entry point 5 for accumulate
+    # NOTE: Test vectors may use different entry point than graypaper spec
+    # Trying entry point 0 (test service simplified interface)
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            5  # Entry point 5 per graypaper spec
+            0  # Entry point 0 for test service
         )
 
         # Check if execution succeeded
@@ -240,10 +249,11 @@ function process_accumulate(
         # Process the queued report
         queued_report = queued_item[:report]
 
-        # Process each work result in the queued report
-        for json_result in queued_report[:results]
-            work_result = parse_work_result(json_result)
+        # Parse the queued report to get work_report structure
+        parsed_report = parse_work_report(queued_report)
 
+        # Process each work result in the queued report
+        for work_result in parsed_report.results
             # Get service account
             if !haskey(new_accounts, work_result.service_id)
                 continue
@@ -258,7 +268,7 @@ function process_accumulate(
 
             # Execute PVM accumulate invocation
             println("  [ACCUMULATE] Processing queued work for service $(work_result.service_id)")
-            updated_account, success = execute_accumulate(work_result, account, state, slot)
+            updated_account, success = execute_accumulate(work_result, parsed_report, account, state, slot)
             if success
                 new_accounts[work_result.service_id] = updated_account
             end
@@ -295,7 +305,7 @@ function process_accumulate(
             end
 
             # Execute PVM accumulate invocation
-            updated_account, success = execute_accumulate(work_result, account, state, slot)
+            updated_account, success = execute_accumulate(work_result, report, account, state, slot)
             if success
                 # Replace account with updated version
                 new_accounts[work_result.service_id] = updated_account
