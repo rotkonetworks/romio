@@ -7,9 +7,10 @@ println("=== Accumulate STF Test Suite ===\n")
 # Test vectors directory
 vectors_dir = "jam-test-vectors/stf/accumulate/tiny"
 
-# Start with absolute simplest test - no reports at all
+# Test vectors in order of complexity
 test_vectors = [
     "no_available_reports-1.json",
+    "process_one_immediate_report-1.json",
 ]
 
 global passed = 0
