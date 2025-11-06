@@ -1,6 +1,8 @@
-# Keccak-256 implementation for Ethereum-compatible hashing
+# Keccak-256 implementation - Optimized for AMD Ryzen 9 7950X3D
 # Based on KangarooTwelve.jl (https://github.com/tecosaur/KangarooTwelve.jl)
 # License: MIT (same as KangarooTwelve.jl)
+
+include("../types/basic.jl")
 
 const EMPTY_STATE = ntuple(_ -> zero(UInt64), 25)
 
@@ -27,6 +29,9 @@ const χs =
      (20, 16), (16, 17), (22, 23), (23, 24), (24, 25), (25, 21),
      (21, 22))
 
+# Thread-local output buffers to avoid allocations
+const KECCAK_OUTPUT_BUFFERS = [Vector{UInt8}(undef, 32) for _ in 1:Threads.nthreads()]
+
 # Keccak-p[1600, 24] permutation
 @inline function keccak_p1600(state::NTuple{25, UInt64})
     @inbounds for round in 1:24
@@ -44,69 +49,117 @@ const χs =
     state
 end
 
-# Keccak-256 hash function (Ethereum-compatible)
-# Uses 0x01 delim suffix (original Keccak) vs 0x06 (SHA3)
-function keccak_256(data::Vector{UInt8})::Vector{UInt8}
+# Fast UInt64 load from byte array (little-endian)
+@inline function load_u64_le(data::Vector{UInt8}, pos::Int)
+    # Directly load 8 bytes as UInt64 (assumes little-endian system)
+    return unsafe_load(Ptr{UInt64}(pointer(data, pos)))
+end
+
+# Fast UInt64 store to byte array (little-endian)
+@inline function store_u64_le!(output::Vector{UInt8}, pos::Int, val::UInt64)
+    unsafe_store!(Ptr{UInt64}(pointer(output, pos)), val)
+    return nothing
+end
+
+# In-place version: write output to pre-allocated buffer
+function keccak_256!(output::Vector{UInt8}, data::Vector{UInt8})
+    @assert length(output) == 32 "Output buffer must be 32 bytes"
+
     # Keccak-256 parameters: rate = 1088 bits = 136 bytes
     rate_bytes = 136
 
     # Initialize state to all zeros
     state = EMPTY_STATE
 
-    # Absorb phase - process data in rate-sized blocks
+    # Absorb phase - optimized with direct UInt64 loads
     pos = 1
-    while pos + rate_bytes <= length(data) + 1
-        # XOR current block into state (little-endian, 8 bytes at a time)
-        for lane in 1:17  # rate_bytes / 8 = 17 lanes
+    data_len = length(data)
+
+    # Process full rate-sized blocks
+    @inbounds while pos + rate_bytes - 1 <= data_len
+        # XOR 17 lanes (136 bytes / 8 = 17 UInt64s) into state
+        # Using direct memory loads for massive speedup
+        for lane in 1:17
             byte_pos = pos + (lane - 1) * 8
-            if byte_pos + 7 <= length(data)
-                # Read 8 bytes as little-endian UInt64
-                val = zero(UInt64)
-                for j in 0:7
-                    val |= UInt64(data[byte_pos + j]) << (8 * j)
-                end
-                state = Base.setindex(state, state[lane] ⊻ val, lane)
-            end
+            val = load_u64_le(data, byte_pos)
+            state = Base.setindex(state, state[lane] ⊻ val, lane)
         end
         state = keccak_p1600(state)
         pos += rate_bytes
     end
 
-    # Absorb remaining bytes
-    remaining = length(data) - pos + 1
-    for i in 0:remaining-1
-        lane = i ÷ 8 + 1
-        byte_in_lane = i % 8
-        state = Base.setindex(state,
-            state[lane] ⊻ (UInt64(data[pos + i]) << (8 * byte_in_lane)),
-            lane)
+    # Absorb remaining bytes (less than one full block)
+    remaining = data_len - pos + 1
+
+    @inbounds if remaining > 0
+        # Process complete lanes
+        num_complete_lanes = remaining >>> 3  # div by 8
+        for lane in 1:num_complete_lanes
+            byte_pos = pos + (lane - 1) * 8
+            val = load_u64_le(data, byte_pos)
+            state = Base.setindex(state, state[lane] ⊻ val, lane)
+        end
+
+        # Process remaining bytes in partial lane
+        bytes_processed = num_complete_lanes << 3  # * 8
+        if bytes_processed < remaining
+            lane = num_complete_lanes + 1
+            partial_val = zero(UInt64)
+            for j in 0:(remaining - bytes_processed - 1)
+                partial_val |= UInt64(data[pos + bytes_processed + j]) << (8 * j)
+            end
+            state = Base.setindex(state, state[lane] ⊻ partial_val, lane)
+        end
     end
 
     # Padding: original Keccak uses 0x01 || 0^* || 0x80
-    # Apply 0x01 suffix at position after last data byte
-    pad_lane = remaining ÷ 8 + 1
-    pad_byte = remaining % 8
-    state = Base.setindex(state,
-        state[pad_lane] ⊻ (UInt64(0x01) << (8 * pad_byte)),
+    pad_lane = (remaining >>> 3) + 1
+    pad_byte = remaining & 7  # mod 8
+    @inbounds state = Base.setindex(state,
+        state[pad_lane] ⊻ (UInt64(0x01) << (pad_byte << 3)),  # * 8
         pad_lane)
 
     # Apply 0x80 at last byte of rate (byte 135, lane 17, byte 7)
-    state = Base.setindex(state,
+    @inbounds state = Base.setindex(state,
         state[17] ⊻ (UInt64(0x80) << 56),
         17)
 
     # Final permutation
     state = keccak_p1600(state)
 
-    # Squeeze phase - extract 32 bytes (256 bits) in little-endian
-    output = zeros(UInt8, 32)
-    for lane in 1:4  # First 4 lanes = 32 bytes
-        for j in 0:7
-            output[(lane-1)*8 + j + 1] = UInt8((state[lane] >> (8 * j)) & 0xff)
-        end
+    # Squeeze phase - optimized with direct UInt64 stores
+    @inbounds for lane in 1:4  # First 4 lanes = 32 bytes
+        store_u64_le!(output, (lane-1)*8 + 1, state[lane])
     end
 
+    return nothing
+end
+
+# Allocation-free version using thread-local buffer
+function keccak_256_fast(data::Vector{UInt8})::Hash
+    tid = Threads.threadid()
+    output = KECCAK_OUTPUT_BUFFERS[tid]
+    keccak_256!(output, data)
+    return Hash(output)
+end
+
+# Standard allocating version for compatibility
+function keccak_256(data::Vector{UInt8})::Vector{UInt8}
+    output = Vector{UInt8}(undef, 32)
+    keccak_256!(output, data)
     return output
 end
 
-export keccak_256
+# Optimized version for AbstractVector (views, etc)
+function keccak_256(data::AbstractVector{UInt8})::Vector{UInt8}
+    # Convert to Vector if needed for performance
+    if data isa Vector{UInt8}
+        return keccak_256(data)
+    else
+        # Copy to contiguous array for fast pointer access
+        data_copy = Vector{UInt8}(data)
+        return keccak_256(data_copy)
+    end
+end
+
+export keccak_256, keccak_256!, keccak_256_fast
