@@ -33,6 +33,18 @@ function parse_hex(hex_str::String)::Vector{UInt8}
     return [parse(UInt8, hex_str[i:i+1], base=16) for i in 1:2:length(hex_str)]
 end
 
+# Parse hex string to fixed-size Hash (32 bytes)
+function parse_hash(hex_str::String)::Hash
+    bytes = parse_hex(hex_str)
+    @assert length(bytes) == 32 "Hash must be 32 bytes, got $(length(bytes))"
+    return Hash(bytes)
+end
+
+# Parse hex string to Hash, allowing any input type
+function parse_hash(hex_str::Union{String, AbstractString})::Hash
+    return parse_hash(String(hex_str))
+end
+
 # Parse service account from JSON
 function parse_service_account(json_data)::ServiceAccount
     # Check if this is accumulate test vector format (has :service field)
@@ -251,5 +263,5 @@ function load_test_vector(filepath::String)
 end
 
 # Export functions
-export parse_hex, parse_service_account, parse_privileges
+export parse_hex, parse_hash, parse_service_account, parse_privileges
 export load_state_from_json, load_test_vector

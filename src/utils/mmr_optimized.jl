@@ -78,49 +78,26 @@ function mmr_append(
     return MMR(peaks, count)
 end
 
-# Compatibility wrapper for old signature - inline implementation
+# Compatibility wrapper for old signature
 function mmr_append(
     peaks::Vector{Union{Nothing, Vector{UInt8}}},
     leaf::Vector{UInt8},
     hash_func::Function = keccak_256
 )::Vector{Union{Nothing, Vector{UInt8}}}
-    # Convert peaks to Hash array
-    hash_peaks = Vector{Hash}(undef, length(peaks))
-    count = 0
+    # Convert to new format
+    mmr = MMR(peaks)
+    leaf_hash = Hash(leaf)
 
-    @inbounds for i in eachindex(peaks)
-        if peaks[i] === nothing
-            hash_peaks[i] = H0
-        else
-            hash_peaks[i] = Hash(peaks[i])
-            count += 1
-        end
-    end
-
-    # Perform append operation inline
-    n = 0
-    current = Hash(leaf)
-
-    @inbounds while n < length(hash_peaks) && hash_peaks[n + 1] != H0
-        current = merge_peaks(hash_peaks[n + 1], current)
-        hash_peaks[n + 1] = H0
-        count -= 1
-        n += 1
-    end
-
-    if n >= length(hash_peaks)
-        push!(hash_peaks, current)
-    else
-        hash_peaks[n + 1] = current
-    end
+    # Append
+    new_mmr = mmr_append(mmr, leaf_hash)
 
     # Convert back to old format
-    result = Vector{Union{Nothing, Vector{UInt8}}}(undef, length(hash_peaks))
-    @inbounds for i in eachindex(hash_peaks)
-        if hash_peaks[i] == H0
+    result = Vector{Union{Nothing, Vector{UInt8}}}(undef, length(new_mmr.peaks))
+    @inbounds for i in eachindex(new_mmr.peaks)
+        if new_mmr.peaks[i] == H0
             result[i] = nothing
         else
-            result[i] = Vector{UInt8}(hash_peaks[i])
+            result[i] = Vector{UInt8}(new_mmr.peaks[i])
         end
     end
 
@@ -162,35 +139,10 @@ function mmr_super_peak(mmr::MMR)::Hash
     return result
 end
 
-# Compatibility wrapper for old signature - inline implementation
+# Compatibility wrapper for old signature
 function mmr_super_peak(peaks::Vector{Union{Nothing, Vector{UInt8}}})::Vector{UInt8}
-    # Filter valid peaks inline
-    valid_peaks = Hash[]
-
-    @inbounds for i in eachindex(peaks)
-        if peaks[i] !== nothing
-            push!(valid_peaks, Hash(peaks[i]))
-        end
-    end
-
-    if length(valid_peaks) == 0
-        return zeros(UInt8, 32)
-    elseif length(valid_peaks) == 1
-        return Vector{UInt8}(valid_peaks[1])
-    end
-
-    # Iterative computation
-    buffer = Vector{UInt8}(undef, 69)  # 5 + 32 + 32
-    @inbounds copyto!(buffer, 1, PEAK_PREFIX, 1, 5)
-
-    result = valid_peaks[1]
-
-    @inbounds for i in 2:length(valid_peaks)
-        copyto!(buffer, 6, result, 1, 32)
-        copyto!(buffer, 38, valid_peaks[i], 1, 32)
-        result = Hash(keccak_256(buffer))
-    end
-
+    mmr = MMR(peaks)
+    result = mmr_super_peak(mmr)
     return Vector{UInt8}(result)
 end
 
