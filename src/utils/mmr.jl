@@ -6,7 +6,7 @@ include("../types/basic.jl")
 
 # Thread-local buffers for hash concatenation (avoid allocations)
 const MMR_MERGE_BUFFERS = [Vector{UInt8}(undef, 64) for _ in 1:Threads.nthreads()]
-const PEAK_PREFIX = SVector{5, UInt8}([0x24, 0x70, 0x65, 0x61, 0x6b])  # "$peak"
+const PEAK_PREFIX = SVector{4, UInt8}([0x70, 0x65, 0x61, 0x6b])  # "peak" (no $ sign)
 
 # Optimized struct: use Hash instead of Union{Nothing, Vector{UInt8}}
 struct MMR
@@ -148,14 +148,14 @@ function mmr_super_peak(mmr::MMR)::Hash
 
     # Iterative approach with buffer reuse
     tid = Threads.threadid()
-    buffer = Vector{UInt8}(undef, 69)  # 5 + 32 + 32
-    @inbounds copyto!(buffer, 1, PEAK_PREFIX, 1, 5)
+    buffer = Vector{UInt8}(undef, 68)  # 4 + 32 + 32
+    @inbounds copyto!(buffer, 1, PEAK_PREFIX, 1, 4)
 
     result = valid_peaks[1]
 
     @inbounds for i in 2:length(valid_peaks)
-        copyto!(buffer, 6, result, 1, 32)
-        copyto!(buffer, 38, valid_peaks[i], 1, 32)
+        copyto!(buffer, 5, result, 1, 32)
+        copyto!(buffer, 37, valid_peaks[i], 1, 32)
         result = Hash(keccak_256(buffer))
     end
 
@@ -180,14 +180,14 @@ function mmr_super_peak(peaks::Vector{Union{Nothing, Vector{UInt8}}})::Vector{UI
     end
 
     # Iterative computation
-    buffer = Vector{UInt8}(undef, 69)  # 5 + 32 + 32
-    @inbounds copyto!(buffer, 1, PEAK_PREFIX, 1, 5)
+    buffer = Vector{UInt8}(undef, 68)  # 4 + 32 + 32
+    @inbounds copyto!(buffer, 1, PEAK_PREFIX, 1, 4)
 
     result = valid_peaks[1]
 
     @inbounds for i in 2:length(valid_peaks)
-        copyto!(buffer, 6, result, 1, 32)
-        copyto!(buffer, 38, valid_peaks[i], 1, 32)
+        copyto!(buffer, 5, result, 1, 32)
+        copyto!(buffer, 37, valid_peaks[i], 1, 32)
         result = Hash(keccak_256(buffer))
     end
 
