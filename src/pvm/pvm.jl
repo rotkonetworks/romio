@@ -2133,25 +2133,30 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 end
 
 function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UInt8}, rw_data::Vector{UInt8}, stack_pages::Int, stack_bytes::Int)
-    # Memory layout per graypaper Y function (equation 765):
+    # Memory layout per graypaper Y function (equation 765, memlayout):
     # Zone 0: 0x00000-0x0FFFF (forbidden - first 64KB)
-    # Zone 1: 0x10000+ (ro_data - read-only data)
-    # Zone 2: after ro_data (rw_data - read-write data)
-    # Heap: after rw_data + stack_pages * PAGE_SIZE
+    # ro_data: ZONE_SIZE to ZONE_SIZE + len(o)
+    # rw_data: 2*ZONE_SIZE + rnq(len(o)) to 2*ZONE_SIZE + rnq(len(o)) + len(w)
+    # Heap: 2*ZONE_SIZE + rnq(len(o)) + rnq(len(w)) + z*PAGE_SIZE
     # Stack: high memory below input
     # Input: 2^32 - ZONE_SIZE - MAX_INPUT
+
+    # Helper: round up to next zone boundary (rnq)
+    function rnq(x::UInt32)::UInt32
+        zone_mask = UInt32(ZONE_SIZE - 1)
+        return (x + zone_mask) & ~zone_mask
+    end
 
     ro_data_start = UInt32(ZONE_SIZE)  # Start at 0x10000
     ro_data_end = ro_data_start + UInt32(length(ro_data))
 
-    # Per graypaper: rw_data starts at 2*ZONE_SIZE (0x20000)
-    rw_data_start = UInt32(2 * ZONE_SIZE)
-    rw_data_end = rw_data_start + UInt32(P_func(UInt32(length(ro_data))))  # Round up ro_len to page
+    # Per graypaper eq:memlayout: rw_data starts at 2*ZONE_SIZE + rnq(len(o))
+    rw_data_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data)))
+    rw_data_end = rw_data_start + UInt32(length(rw_data))
 
-    # Heap pointer per traces/README.md: rw_data_end + PAGE_SIZE
-    # Per graypaper: heap starts after rw_data rounded up, plus stack_pages
-    heap_start = rw_data_end + UInt32(stack_pages * PAGE_SIZE)
-    state.memory.current_heap_pointer = heap_start + UInt32(PAGE_SIZE)  # Extra PAGE_SIZE per README
+    # Heap pointer per graypaper: 2*ZONE_SIZE + rnq(len(o)) + rnq(len(w)) + z*PAGE_SIZE
+    heap_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data))) + rnq(UInt32(length(rw_data))) + UInt32(stack_pages * PAGE_SIZE)
+    state.memory.current_heap_pointer = heap_start
 
     println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
     println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16))")
