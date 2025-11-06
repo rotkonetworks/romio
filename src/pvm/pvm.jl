@@ -190,17 +190,31 @@ function deblob(program::Vector{UInt8})
     # E_3(s) - stack bytes (3 bytes)
     stack_bytes, offset = read_fixed_le(program, offset, 3)
 
-    # Skip o - RO data
-    offset += Int(ro_len)
-    if offset > length(program)
+    # Extract o - RO data
+    ro_data_start = offset
+    ro_data_end = offset + Int(ro_len) - 1
+    if ro_data_end > length(program)
         return nothing
     end
+    ro_data = if ro_len > 0
+        program[ro_data_start:ro_data_end]
+    else
+        UInt8[]
+    end
+    offset = ro_data_end + 1
 
-    # Skip w - RW data
-    offset += Int(rw_len)
-    if offset > length(program)
+    # Extract w - RW data
+    rw_data_start = offset
+    rw_data_end = offset + Int(rw_len) - 1
+    if rw_data_end > length(program)
         return nothing
     end
+    rw_data = if rw_len > 0
+        program[rw_data_start:rw_data_end]
+    else
+        UInt8[]
+    end
+    offset = rw_data_end + 1
 
     # E_4(len(c)) - code blob length (4 bytes)
     code_blob_len, offset = read_fixed_le(program, offset, 4)
@@ -276,7 +290,7 @@ function deblob(program::Vector{UInt8})
         opcode_mask[i+1] = (mask_bytes[byte_idx] & (1 << bit_idx)) != 0
     end
 
-    return (instructions, opcode_mask, jump_table)
+    return (instructions, opcode_mask, jump_table, ro_data, rw_data, Int(stack_pages), Int(stack_bytes))
 end
 
 # find next instruction (skip distance)
@@ -940,7 +954,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
                     # Allocate pages in the new range
                     for page_idx in idx_start:(idx_end-1)
                         if page_idx + 1 <= length(state.memory.access)
-                            state.memory.access[page_idx + 1] = :write
+                            state.memory.access[page_idx + 1] = WRITE
                         end
                     end
                 end
@@ -1897,8 +1911,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
         Dict{UInt32, GuestPVM}()  # machines
     )
     
-    # setup memory layout
-    setup_memory!(state, input)
+    # setup memory layout with program segments
+    setup_memory!(state, input, ro_data, rw_data, stack_pages, stack_bytes)
     
     # run until halt
     initial_gas = state.gas
@@ -1963,7 +1977,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         return (PANIC, UInt8[], 0, Vector{UInt8}[])
     end
 
-    instructions, opcode_mask, jump_table = result
+    instructions, opcode_mask, jump_table, ro_data, rw_data, stack_pages, stack_bytes = result
 
     # Determine starting PC based on entry point
     # Entry point 0 = start at PC 0
@@ -2014,8 +2028,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         Dict{UInt32, GuestPVM}()  # machines
     )
 
-    # setup memory layout
-    setup_memory!(state, input)
+    # setup memory layout with program segments
+    setup_memory!(state, input, ro_data, rw_data, stack_pages, stack_bytes)
 
     # run until halt
     initial_gas = state.gas
@@ -2118,67 +2132,80 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     return (state.status, output, gas_used, state.exports)
 end
 
-function setup_memory!(state::PVMState, input::Vector{UInt8})
-    # Input at high memory per graypaper Y function:
-    # Input address = 2^32 - ZONE_SIZE - MAX_INPUT
-    input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
-    println("  [MEM SETUP] input_start=0x$(string(input_start, base=16)), input_len=$(length(input))")
+function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UInt8}, rw_data::Vector{UInt8}, stack_pages::Int, stack_bytes::Int)
+    # Memory layout per graypaper Y function (equation 765):
+    # Zone 0: 0x00000-0x0FFFF (forbidden - first 64KB)
+    # Zone 1: 0x10000+ (ro_data - read-only data)
+    # Zone 2: after ro_data (rw_data - read-write data)
+    # Heap: after rw_data + stack_pages * PAGE_SIZE
+    # Stack: high memory below input
+    # Input: 2^32 - ZONE_SIZE - MAX_INPUT
 
-    # Write input to high memory (input zone)
-    for i in 1:min(length(input), MAX_INPUT)
-        state.memory.data[input_start + i] = input[i]
+    ro_data_start = UInt32(ZONE_SIZE)  # Start at 0x10000
+    ro_data_end = ro_data_start + UInt32(length(ro_data))
+
+    # Per graypaper: rw_data starts at 2*ZONE_SIZE (0x20000)
+    rw_data_start = UInt32(2 * ZONE_SIZE)
+    rw_data_end = rw_data_start + UInt32(P_func(UInt32(length(ro_data))))  # Round up ro_len to page
+
+    # Heap pointer per traces/README.md: rw_data_end + PAGE_SIZE
+    # Per graypaper: heap starts after rw_data rounded up, plus stack_pages
+    heap_start = rw_data_end + UInt32(stack_pages * PAGE_SIZE)
+    state.memory.current_heap_pointer = heap_start + UInt32(PAGE_SIZE)  # Extra PAGE_SIZE per README
+
+    println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
+    println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16))")
+    println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
+    println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
+
+    # Write ro_data to zone 1 (0x10000+)
+    for i in 1:length(ro_data)
+        state.memory.data[ro_data_start + i - 1] = ro_data[i]
     end
-    println("  [MEM SETUP] Wrote input bytes to addresses 0x$(string(input_start, base=16)) - 0x$(string(input_start + length(input) - 1, base=16))")
 
-    # Mark input pages as readable
-    for page in div(input_start, PAGE_SIZE):div(input_start + length(input), PAGE_SIZE)
-        state.memory.access[page + 1] = READ
+    # Write rw_data to zone 2 (0x20000+)
+    for i in 1:length(rw_data)
+        state.memory.data[rw_data_start + i - 1] = rw_data[i]
     end
 
-    # Stack region: below input, grows downward (writable)
-    # Stack starts at SP and can grow down, allocate reasonable stack space
-    stack_top = UInt32(UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT))
-    stack_bottom = stack_top - UInt32(1024 * 1024)  # 1MB stack
-    for page in div(stack_bottom, PAGE_SIZE):div(stack_top, PAGE_SIZE)
-        if page + 1 <= length(state.memory.access)
-            state.memory.access[page + 1] = WRITE
-        end
-    end
-
-    # Initialize heap pointer per traces/README.md memory model
-    # Zone 0: 0x00000-0x0FFFF (forbidden)
-    # Zone 1: 0x10000-0x1FFFF (ro_data - readable)
-    # Zone 2: 0x20000-0x2FFFF (rw_data - writable)
-    # Zone 3+: 0x30000+ (heap - writable)
-
-    ro_data_start = UInt32(ZONE_SIZE)
-    ro_data_end = UInt32(2 * ZONE_SIZE)
-    rw_data_start = ro_data_end
-    rw_data_end = UInt32(3 * ZONE_SIZE)
-
-    # Pre-allocate initial heap (1 zone = 64KB)
-    heap_prealloc_end = UInt32(4 * ZONE_SIZE)
-    state.memory.current_heap_pointer = heap_prealloc_end
-
-    # Mark ro_data zone as readable (zone 1: 0x10000-0x1FFFF)
+    # Mark ro_data pages as readable
     for page in div(ro_data_start, PAGE_SIZE):div(ro_data_end - 1, PAGE_SIZE)
         if page + 1 <= length(state.memory.access)
             state.memory.access[page + 1] = READ
         end
     end
 
-    # Mark rw_data zone + initial heap as writable (zones 2-3: 0x20000-0x3FFFF)
-    for page in div(rw_data_start, PAGE_SIZE):div(heap_prealloc_end - 1, PAGE_SIZE)
+    # Mark rw_data + heap pages as writable
+    for page in div(rw_data_start, PAGE_SIZE):div(state.memory.current_heap_pointer, PAGE_SIZE)
         if page + 1 <= length(state.memory.access)
             state.memory.access[page + 1] = WRITE
         end
     end
 
-    # setup initial registers per spec
-    state.registers[1] = UInt64(0xFFFF0000)  # RA = 2^32 - 2^16 (halt address)
-    state.registers[2] = UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT)  # SP
-    state.registers[8] = UInt64(input_start)  # A0
-    state.registers[9] = UInt64(length(input))  # A1
+    # Input at high memory per graypaper Y function
+    input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
+    println("  [MEM SETUP] input: 0x$(string(input_start, base=16)) ($(length(input)) bytes)")
+
+    # Write input to high memory
+    for i in 1:min(length(input), MAX_INPUT)
+        state.memory.data[input_start + i - 1] = input[i]
+    end
+
+    # Mark input pages as readable
+    for page in div(input_start, PAGE_SIZE):div(input_start + length(input), PAGE_SIZE)
+        state.memory.access[page + 1] = READ
+    end
+
+    # Stack region: below input, per graypaper SP = 2^32 - 2*ZONE_SIZE - MAX_INPUT
+    stack_top = UInt32(UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT))
+    stack_bottom = stack_top - UInt32(max(stack_bytes, 1024 * 1024))  # Use actual stack size or 1MB min
+    println("  [MEM SETUP] stack: 0x$(string(stack_bottom, base=16))-0x$(string(stack_top, base=16))")
+
+    for page in div(stack_bottom, PAGE_SIZE):div(stack_top, PAGE_SIZE)
+        if page + 1 <= length(state.memory.access)
+            state.memory.access[page + 1] = WRITE
+        end
+    end
 end
 
 function extract_output(state::PVMState)
