@@ -1987,6 +1987,18 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         return (PANIC, UInt8[], 0, Vector{UInt8}[])
     end
 
+    # Initialize registers per graypaper Y function (equation \ref{eq:registers})
+    # r0 = 2^32 - 2^16
+    # r1 (SP) = 2^32 - 2*ZONE_SIZE - MAX_INPUT
+    # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (input address)
+    # r8 = len(input) (input length)
+    # others = 0
+    registers = zeros(UInt64, 13)
+    registers[1] = UInt64(2^32 - 2^16)  # r0
+    registers[2] = UInt64(2^32 - 2*ZONE_SIZE - MAX_INPUT)  # r1/SP
+    registers[8] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r7 (input address)
+    registers[9] = UInt64(length(input))  # r8 (input length)
+
     # initialize state
     state = PVMState(
         start_pc,  # pc starts at entry point
@@ -1994,7 +2006,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         Int64(gas),  # gas
         instructions,  # instructions
         opcode_mask,  # opcode_mask
-        zeros(UInt64, 13),  # registers
+        registers,  # registers with proper initial values
         Memory(),  # memory
         jump_table,  # jump_table
         UInt32(0),  # host_call_id
@@ -2107,13 +2119,18 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 end
 
 function setup_memory!(state::PVMState, input::Vector{UInt8})
-    # input at high memory (readable)
+    # Input at high memory per graypaper Y function:
+    # Input address = 2^32 - ZONE_SIZE - MAX_INPUT
     input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
+    println("  [MEM SETUP] input_start=0x$(string(input_start, base=16)), input_len=$(length(input))")
+
+    # Write input to high memory (input zone)
     for i in 1:min(length(input), MAX_INPUT)
         state.memory.data[input_start + i] = input[i]
     end
+    println("  [MEM SETUP] Wrote input bytes to addresses 0x$(string(input_start, base=16)) - 0x$(string(input_start + length(input) - 1, base=16))")
 
-    # mark input pages as readable
+    # Mark input pages as readable
     for page in div(input_start, PAGE_SIZE):div(input_start + length(input), PAGE_SIZE)
         state.memory.access[page + 1] = READ
     end
