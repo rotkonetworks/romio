@@ -143,6 +143,9 @@ end
 
 """
 Create implications context for a service invocation
+Per graypaper: initial context is I(...)^2 meaning a PAIR (imX, imY) where both
+dimensions are initialized identically. The exceptional_state (imY) starts as a
+shallow copy that shares references to mutable structures.
 """
 function ImplicationsContext(
     service_id::ServiceId,
@@ -150,9 +153,11 @@ function ImplicationsContext(
     accounts::Dict{ServiceId, ServiceAccount},
     privileged_state::PrivilegedState,
     current_time::TimeSlot;
-    next_free_id::ServiceId = UInt32(2^16)  # Start from Cminpublicindex
+    next_free_id::ServiceId = UInt32(2^16),  # Start from Cminpublicindex
+    initialize_pair::Bool = true  # Create imY copy for accumulate invocations
 )
-    ImplicationsContext(
+    # Create the base implications context (imX)
+    imX = ImplicationsContext(
         service_id,
         self,
         privileged_state,
@@ -162,8 +167,51 @@ function ImplicationsContext(
         nothing,
         next_free_id,
         current_time,
-        nothing  # no checkpoint initially
+        nothing  # temporary, will be set below
     )
+
+    # Per graypaper I(...)^2: initialize exceptional_state (imY) as a copy of imX
+    # The checkpoint host call updates imY to current imX state
+    # On panic/oog, imY state is used instead of imX
+    if initialize_pair
+        # Create imY as a DEEP copy - independent from imX
+        # Both start with the same values, but modifications to imX don't affect imY
+        # The checkpoint host call will update imY to match current imX when called
+
+        # Deep copy the ServiceAccount to ensure imX and imY are independent
+        self_copy = ServiceAccount(
+            copy(self.code_hash),
+            copy(self.storage),  # new dict
+            copy(self.preimages),  # new dict
+            copy(self.requests),  # new dict
+            self.balance,
+            self.min_balance,
+            self.min_acc_gas,
+            self.min_memo_gas,
+            self.octets,
+            self.items,
+            self.gratis,
+            self.created,
+            self.last_acc,
+            self.parent
+        )
+
+        imY = ImplicationsContext(
+            service_id,
+            self_copy,  # independent copy of service account
+            privileged_state,  # can share - not modified during accumulate
+            accounts,  # can share - dict reference
+            DeferredTransfer[],  # empty transfers
+            Set{Tuple{ServiceId, Blob}}(),  # empty provisions
+            nothing,
+            next_free_id,
+            current_time,
+            nothing  # imY doesn't have its own exceptional state
+        )
+        imX.exceptional_state = imY
+    end
+
+    return imX
 end
 
 """

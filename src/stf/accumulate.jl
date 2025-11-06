@@ -135,57 +135,70 @@ function execute_accumulate(
         return (account, false)
     end
 
-    # Per graypaper spec (line 163 of pvm_invocations.tex):
-    # Entry point with input = encode(timeslot, service_id, count)
-    # Operand tuples are accessed via FETCH host call
+    # Per graypaper: input = encode(timeslot, service_id, work_result_count)
+    # For this work report with 1 result for this service
+    input_timeslot = current_slot
+    input_service_id = work_result.service_id
+    input_count = UInt32(1)  # This work result count
 
-    # JAM encoding gets further (845 steps vs 763 with raw LE)
+    # JAM encode: compact encoding of (timeslot, service_id, count)
+    # Concatenate three compact-encoded integers
     input = UInt8[]
-    append!(input, encode_jam_compact(current_slot))  # timeslot (JAM compact)
-    append!(input, encode_jam_compact(work_result.service_id))  # service_id (JAM compact)
-    append!(input, encode_jam_compact(1))  # count = 1 (1 operand tuple)
+    append!(input, encode_jam_compact(input_timeslot))
+    append!(input, encode_jam_compact(input_service_id))
+    append!(input, encode_jam_compact(input_count))
 
-    println("  [ACCUMULATE] Input: encode(timeslot=$current_slot, service_id=$(work_result.service_id), count=1)")
-    println("  [ACCUMULATE] Input hex: $(bytes2hex(input))")
+    println("  [ACCUMULATE] Input: encode($input_timeslot, $input_service_id, $input_count) = $(bytes2hex(input))")
     println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
 
     # Execute PVM with accumulate invocation type
-    # Per graypaper line 163: entry point 5 for accumulate
+    # Per graypaper: accumulate uses entry point 5
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            5  # Entry point 5 per graypaper spec
+            5  # Entry point 5 - accumulate per graypaper
         )
 
-        # Check if execution succeeded
-        if status != PVM.HALT
-            # Execution failed - return unchanged account
+        # Per graypaper: on exceptional exit (panic/oog), use imY state
+        # On normal exit (halt), use imX state
+        if status == PVM.PANIC || status == PVM.OOG
+            # Exceptional exit - use imY (exceptional_state) per graypaper
+            if implications.exceptional_state !== nothing
+                # Use the exceptional state (imY)
+                updated_account = implications.exceptional_state.self
+            else
+                # No exceptional state means service panicked before checkpoint
+                # Fall back to imX state
+                updated_account = implications.self
+            end
+        elseif status == PVM.HALT
+            # Normal exit - use imX state
+            updated_account = implications.self
+        else
+            # Unknown status - return unchanged account
             return (account, false)
         end
 
-        # Apply implications from context to service account
-        # The host calls (WRITE, etc.) have already modified implications.self
-        updated_account = implications.self
-
         # Update last_acc to current slot (graypaper: accountspostxfer)
+        # Build new ServiceAccount with updated last_acc field
         updated_account = ServiceAccount(
             updated_account.code_hash,
+            updated_account.storage,
+            updated_account.preimages,
+            updated_account.requests,
             updated_account.balance,
+            updated_account.min_balance,
             updated_account.min_acc_gas,
             updated_account.min_memo_gas,
-            gratis = updated_account.gratis,
-            created = updated_account.created,
-            parent = updated_account.parent,
-            octets = updated_account.octets,
-            items = updated_account.items,
-            min_balance = updated_account.min_balance,
-            last_acc = UInt32(current_slot),  # Update to current slot
-            storage = updated_account.storage,
-            preimages = updated_account.preimages,
-            preimage_meta = updated_account.preimage_meta
+            updated_account.octets,
+            updated_account.items,
+            updated_account.gratis,
+            updated_account.created,
+            UInt32(current_slot),  # Update last_acc to current slot
+            updated_account.parent
         )
 
         return (updated_account, true)
