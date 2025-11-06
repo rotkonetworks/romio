@@ -2025,7 +2025,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         end
         if state.status == CONTINUE
             # Trace first steps and steps near error
-            if (step_count >= 0 && step_count < 5) || (step_count >= 260 && step_count < 280) || (step_count >= 840 && step_count < 850)
+            if (step_count >= 0 && step_count < 60) || (step_count >= 260 && step_count < 280) || (step_count >= 840 && step_count < 850)
                 if state.pc + 1 <= length(state.instructions)
                     opcode = state.instructions[state.pc + 1]
                     r1 = state.registers[2]  # SP
