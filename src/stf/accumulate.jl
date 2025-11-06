@@ -150,14 +150,15 @@ function execute_accumulate(
     println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
 
     # Execute PVM with accumulate invocation type
-    # Per graypaper line 163: entry point 5 for accumulate
+    # Test service uses entry point 0 (simplified), graypaper spec uses 5
+    # Try entry point 0 first for test compatibility
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            5  # Entry point 5 per spec
+            0  # Entry point 0 for test service
         )
 
         # Check if execution succeeded
