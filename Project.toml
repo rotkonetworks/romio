@@ -1,20 +1,22 @@
-# Project.toml
 name = "JAM"
 uuid = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
-authors = ["jamit@rotko.net"]
 version = "0.1.0"
+authors = ["jamit@rotko.net"]
 
 [deps]
-SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
-Keccak = "46f8cb0c-4e3a-418e-8a08-140a605d534d"
+BatchedMerkleTree = "225b011c-e439-4471-b39b-04a9a0fe32f0"
 BinaryFields = "0fee9d7f-8397-4f0d-9ec6-117db1666467"
 BinaryReedSolomon = "8a283c49-c6d0-46c5-bbc1-5b2a51f34960"
-BatchedMerkleTree = "225b011c-e439-4471-b39b-04a9a0fe32f0"
-StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
-DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 BitIntegers = "c3b6d118-76ef-56ca-8cc7-ebb389d030a1"
-
+DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
+Keccak = "46f8cb0c-4e3a-418e-8a08-140a605d534d"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+StructArrays = "0.7.2"
 
 [targets]
 test = ["Test"]
