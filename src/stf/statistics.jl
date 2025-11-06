@@ -23,54 +23,82 @@ struct StatisticsState
 end
 
 # Process statistics STF
+# Per graypaper statistics.tex equations 39-68
 function process_statistics(
     state::StatisticsState,
     slot::TimeSlot,
     author_index::Int,
-    extrinsic::Dict{Symbol, Any}
+    extrinsic::Dict{Symbol, Any};
+    epoch_length::Int = 12  # Tiny test config uses 12, full uses 600
 )::StatisticsState
 
-    # Copy current stats (deep copy to avoid mutation)
-    new_curr_stats = [ValidatorStats(s.blocks, s.tickets, s.pre_images, s.pre_images_size, s.guarantees, s.assurances)
-                      for s in state.vals_curr_stats]
+    # Check for epoch change
+    pre_epoch = div(state.slot, epoch_length)
+    new_epoch = div(slot, epoch_length)
 
-    # Update the author's statistics
+    # Handle epoch transition
+    new_curr_stats, new_last_stats = if new_epoch == pre_epoch
+        # Same epoch: keep accumulator and previous
+        ([ValidatorStats(s.blocks, s.tickets, s.pre_images, s.pre_images_size, s.guarantees, s.assurances)
+          for s in state.vals_curr_stats], state.vals_last_stats)
+    else
+        # New epoch: reset accumulator, move old to previous
+        zero_stats = [ValidatorStats(0, 0, 0, 0, 0, 0) for _ in state.vals_curr_stats]
+        (zero_stats, state.vals_curr_stats)
+    end
+
+    # Update the author's block count
     if author_index >= 0 && author_index < length(new_curr_stats)
-        author_stats = new_curr_stats[author_index + 1]  # Julia 1-indexed
+        new_curr_stats[author_index + 1].blocks += 1
 
-        # Increment blocks
-        author_stats.blocks += 1
-
-        # Count tickets
+        # Count tickets (author only)
         if haskey(extrinsic, :tickets)
-            author_stats.tickets += length(extrinsic[:tickets])
+            new_curr_stats[author_index + 1].tickets += length(extrinsic[:tickets])
         end
 
-        # Count preimages
+        # Count preimages (author only)
         if haskey(extrinsic, :preimages)
             preimages = extrinsic[:preimages]
-            author_stats.pre_images += length(preimages)
+            new_curr_stats[author_index + 1].pre_images += length(preimages)
             # Sum preimage sizes
             for preimage in preimages
                 if haskey(preimage, :blob)
                     blob = preimage[:blob]
                     if startswith(blob, "0x")
-                        author_stats.pre_images_size += div(length(blob) - 2, 2)
+                        new_curr_stats[author_index + 1].pre_images_size += div(length(blob) - 2, 2)
                     else
-                        author_stats.pre_images_size += length(blob)
+                        new_curr_stats[author_index + 1].pre_images_size += length(blob)
                     end
                 end
             end
         end
+    end
 
-        # Count guarantees
-        if haskey(extrinsic, :guarantees)
-            author_stats.guarantees += length(extrinsic[:guarantees])
+    # Count guarantees per validator who signed
+    # Per graypaper eq 62-63: increment for each validator in reporters set
+    if haskey(extrinsic, :guarantees)
+        for guarantee in extrinsic[:guarantees]
+            if haskey(guarantee, :signatures)
+                for sig in guarantee[:signatures]
+                    validator_idx = sig[:validator_index] + 1  # Julia 1-indexed
+                    if validator_idx >= 1 && validator_idx <= length(new_curr_stats)
+                        new_curr_stats[validator_idx].guarantees += 1
+                    end
+                end
+            end
         end
+    end
 
-        # Count assurances
-        if haskey(extrinsic, :assurances)
-            author_stats.assurances += length(extrinsic[:assurances])
+    # Count assurances per validator who made them
+    # Per graypaper eq 64-66: increment if assurer = validator
+    if haskey(extrinsic, :assurances)
+        for assurance in extrinsic[:assurances]
+            if haskey(assurance, :validator_index)
+                validator_idx = assurance[:validator_index] + 1  # Julia 1-indexed
+                if validator_idx >= 1 && validator_idx <= length(new_curr_stats)
+                    new_curr_stats[validator_idx].assurances += 1
+                end
+            end
         end
     end
 
@@ -78,7 +106,7 @@ function process_statistics(
         state.curr_validators,
         slot,
         new_curr_stats,
-        state.vals_last_stats
+        new_last_stats
     )
 end
 
