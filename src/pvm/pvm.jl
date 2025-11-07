@@ -2154,8 +2154,9 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     rw_data_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data)))
     rw_data_end = rw_data_start + UInt32(length(rw_data))
 
-    # Heap pointer per graypaper: 2*ZONE_SIZE + rnq(len(o)) + rnq(len(w)) + z*PAGE_SIZE
-    heap_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data))) + rnq(UInt32(length(rw_data))) + UInt32(stack_pages * PAGE_SIZE)
+    # Heap pointer per graypaper eq:memlayout: 2*ZONE_SIZE + rnq(len(o)) + rnp(len(w)) + z*PAGE_SIZE
+    # rnp rounds to PAGE boundary, rnq rounds to ZONE boundary
+    heap_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data))) + P_func(UInt32(length(rw_data))) + UInt32(stack_pages * PAGE_SIZE)
     state.memory.current_heap_pointer = heap_start
 
     println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
