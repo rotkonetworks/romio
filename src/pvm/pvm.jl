@@ -2154,10 +2154,14 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     rw_data_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data)))
     rw_data_end = rw_data_start + UInt32(length(rw_data))
 
-    # Heap pointer per graypaper eq:memlayout: 2*ZONE_SIZE + rnq(len(o)) + rnp(len(w)) + z*PAGE_SIZE
+    # Heap pointer per graypaper eq:memlayout: h = 2*ZONE_SIZE + rnq(len(o)) + rnp(len(w))
+    # The z*PAGE_SIZE is the SIZE of pre-allocated heap, not added to the pointer!
     # rnp rounds to PAGE boundary, rnq rounds to ZONE boundary
-    heap_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data))) + P_func(UInt32(length(rw_data))) + UInt32(stack_pages * PAGE_SIZE)
+    heap_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data))) + P_func(UInt32(length(rw_data)))
     state.memory.current_heap_pointer = heap_start
+
+    # Pre-allocate heap pages for SBRK (z pages worth)
+    heap_prealloc_end = heap_start + UInt32(stack_pages * PAGE_SIZE)
 
     println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
     println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16))")
@@ -2181,8 +2185,8 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
         end
     end
 
-    # Mark rw_data + heap pages as writable
-    for page in div(rw_data_start, PAGE_SIZE):div(state.memory.current_heap_pointer, PAGE_SIZE)
+    # Mark rw_data + pre-allocated heap pages as writable
+    for page in div(rw_data_start, PAGE_SIZE):div(heap_prealloc_end - 1, PAGE_SIZE)
         if page + 1 <= length(state.memory.access)
             state.memory.access[page + 1] = WRITE
         end
