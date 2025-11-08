@@ -201,6 +201,12 @@ function deblob(program::Vector{UInt8})
     else
         UInt8[]
     end
+
+    # Debug: check offset 0x900
+    # if length(ro_data) > 0x900
+    #     println("  [DEBLOB] ro_data[0x901] (offset 0x900) = 0x$(string(ro_data[0x901], base=16, pad=2))")
+    # end
+
     offset = ro_data_end + 1
 
     # Extract w - RW data
@@ -2163,20 +2169,27 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     # Pre-allocate heap pages for SBRK (z pages worth)
     heap_prealloc_end = heap_start + UInt32(stack_pages * PAGE_SIZE)
 
-    println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
-    println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16))")
-    println("  [MEM SETUP] rw_data_buffer_end: 0x$(string(rw_data_buffer_end, base=16))")
-    println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
-    println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
+    # println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
+    # println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16))")
+    # println("  [MEM SETUP] rw_data_buffer_end: 0x$(string(rw_data_buffer_end, base=16))")
+    # println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
+    # println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
 
     # Write ro_data to zone 1 (0x10000+)
     for i in 1:length(ro_data)
-        state.memory.data[ro_data_start + i - 1] = ro_data[i]
+        state.memory.data[ro_data_start + i] = ro_data[i]  # Fixed: was + i - 1, now + i
     end
+
+    # Debug: verify write
+    # if length(ro_data) > 0x900
+    #     written_addr = UInt32(0x10000 + 0x900)
+    #     written_val = state.memory.data[written_addr + 1]  # Fixed: add +1 for 1-indexing
+    #     println("  [MEM WRITE] Wrote to addr 0x$(string(written_addr, base=16)): value=0x$(string(written_val, base=16, pad=2))")
+    # end
 
     # Write rw_data to zone 2 (0x20000+)
     for i in 1:length(rw_data)
-        state.memory.data[rw_data_start + i - 1] = rw_data[i]
+        state.memory.data[rw_data_start + i] = rw_data[i]  # Fixed: was + i - 1, now + i
     end
 
     # Mark ro_data pages as readable
@@ -2199,7 +2212,7 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
 
     # Write input to high memory
     for i in 1:min(length(input), MAX_INPUT)
-        state.memory.data[input_start + i - 1] = input[i]
+        state.memory.data[input_start + i] = input[i]  # Fixed: was + i - 1, now + i
     end
 
     # Mark input pages as readable
