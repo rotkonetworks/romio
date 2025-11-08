@@ -281,6 +281,9 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
     # All host calls cost at least 10 gas (base cost)
     # Additional costs may be added by specific functions
 
+    # Debug: trace ALL host calls for debugging
+    # println("  [HOST] call_id=$call_id at gas=$(state.gas), r7=$(state.registers[8]), r8=$(state.registers[9])")
+
     if call_id == 100
         # Test-only host call
         state.gas -= 10

@@ -111,14 +111,14 @@ function execute_accumulate(
     # result (raw blob, maybe not JAM-encoded?) - from work_result
     append!(operandtuple_encoded, work_result.result.ok)
 
-    println("  [ACCUMULATE] Operandtuple ($(length(operandtuple_encoded)) bytes): $(bytes2hex(operandtuple_encoded))")
-    println("    package_hash: $(bytes2hex(work_report.package_hash))")
-    println("    seg_root: $(bytes2hex(work_report.seg_root))")
-    println("    authorizer: $(bytes2hex(work_report.authorizer_hash))")
-    println("    payload_hash: $(bytes2hex(work_result.payload_hash))")
-    println("    gas_limit: $(work_result.accumulate_gas)")
-    println("    auth_trace: (empty)")
-    println("    result: $(bytes2hex(work_result.result.ok))")
+    # println("  [ACCUMULATE] Operandtuple ($(length(operandtuple_encoded)) bytes): $(bytes2hex(operandtuple_encoded))")
+    # println("    package_hash: $(bytes2hex(work_report.package_hash))")
+    # println("    seg_root: $(bytes2hex(work_report.seg_root))")
+    # println("    authorizer: $(bytes2hex(work_report.authorizer_hash))")
+    # println("    payload_hash: $(bytes2hex(work_result.payload_hash))")
+    # println("    gas_limit: $(work_result.accumulate_gas)")
+    # println("    auth_trace: (empty)")
+    # println("    result: $(bytes2hex(work_result.result.ok))")
 
     # Create work package context for FETCH host call
     work_package = Dict{Symbol, Any}(
@@ -148,8 +148,8 @@ function execute_accumulate(
     append!(input, encode_jam_compact(input_service_id))
     append!(input, encode_jam_compact(input_count))
 
-    println("  [ACCUMULATE] Input: encode($input_timeslot, $input_service_id, $input_count) = $(bytes2hex(input))")
-    println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
+    # println("  [ACCUMULATE] Input: encode($input_timeslot, $input_service_id, $input_count) = $(bytes2hex(input))")
+    # println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
 
     # Execute PVM with accumulate invocation type
     # Per graypaper: accumulate uses entry point 5
@@ -162,46 +162,50 @@ function execute_accumulate(
             5  # Entry point 5 - accumulate per graypaper
         )
 
+        # println("  [EXECUTE] status=$status, PVM.PANIC=$(PVM.PANIC), PVM.HALT=$(PVM.HALT)")
+        # println("  [EXECUTE] status==PVM.PANIC: $(status == PVM.PANIC)")
+        # println("  [EXECUTE] implications.self.storage items: $(length(implications.self.storage))")
+        # if implications.exceptional_state !== nothing
+        #     println("  [EXECUTE] implications.exceptional_state.self.storage items: $(length(implications.exceptional_state.self.storage))")
+        # end
+
         # Per graypaper: on exceptional exit (panic/oog), use imY state
         # On normal exit (halt), use imX state
         if status == PVM.PANIC || status == PVM.OOG
             # Exceptional exit - use imY (exceptional_state) per graypaper
+            # Do NOT update last_acc on panic - return unchanged account
             if implications.exceptional_state !== nothing
                 # Use the exceptional state (imY)
-                updated_account = implications.exceptional_state.self
+                return (implications.exceptional_state.self, true)
             else
                 # No exceptional state means service panicked before checkpoint
-                # Fall back to imX state
-                updated_account = implications.self
+                # Return original account unchanged
+                return (account, false)
             end
         elseif status == PVM.HALT
             # Normal exit - use imX state
-            updated_account = implications.self
+            # Update last_acc to current slot (graypaper: accountspostxfer)
+            updated_account = ServiceAccount(
+                implications.self.code_hash,
+                implications.self.storage,
+                implications.self.preimages,
+                implications.self.requests,
+                implications.self.balance,
+                implications.self.min_balance,
+                implications.self.min_acc_gas,
+                implications.self.min_memo_gas,
+                implications.self.octets,
+                implications.self.items,
+                implications.self.gratis,
+                implications.self.created,
+                UInt32(current_slot),  # Update last_acc to current slot
+                implications.self.parent
+            )
+            return (updated_account, true)
         else
             # Unknown status - return unchanged account
             return (account, false)
         end
-
-        # Update last_acc to current slot (graypaper: accountspostxfer)
-        # Build new ServiceAccount with updated last_acc field
-        updated_account = ServiceAccount(
-            updated_account.code_hash,
-            updated_account.storage,
-            updated_account.preimages,
-            updated_account.requests,
-            updated_account.balance,
-            updated_account.min_balance,
-            updated_account.min_acc_gas,
-            updated_account.min_memo_gas,
-            updated_account.octets,
-            updated_account.items,
-            updated_account.gratis,
-            updated_account.created,
-            UInt32(current_slot),  # Update last_acc to current slot
-            updated_account.parent
-        )
-
-        return (updated_account, true)
     catch e
         # PVM exception error
         println("    ❌ PVM exception: $(typeof(e))")
@@ -286,7 +290,7 @@ function process_accumulate(
             end
 
             # Execute PVM accumulate invocation
-            println("  [ACCUMULATE] Processing queued work for service $(work_result.service_id)")
+            # println("  [ACCUMULATE] Processing queued work for service $(work_result.service_id)")
             updated_account, success = execute_accumulate(work_result, parsed_report, account, state, slot)
             if success
                 new_accounts[work_result.service_id] = updated_account
@@ -303,7 +307,7 @@ function process_accumulate(
         # TODO: implement proper prerequisite checking against state
         # For now, if prerequisites exist, skip processing (queue to ready_queue)
         if length(report.prerequisites) > 0
-            println("  [ACCUMULATE] Skipping report with $(length(report.prerequisites)) prerequisites (should be queued)")
+            # println("  [ACCUMULATE] Skipping report with $(length(report.prerequisites)) prerequisites (should be queued)")
             continue
         end
 

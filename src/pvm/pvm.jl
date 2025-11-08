@@ -1993,7 +1993,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         jump_table[entry_point + 1]
     end
 
-    println("  [PVM START] Entry point=$entry_point, start_pc=0x$(string(start_pc, base=16)), jump_table_size=$(length(jump_table)), code_length=$(length(instructions))")
+    # println("  [PVM START] Entry point=$entry_point, start_pc=0x$(string(start_pc, base=16)), jump_table_size=$(length(jump_table)), code_length=$(length(instructions))")
 
     # Validate start_pc is within code
     if start_pc >= length(instructions)
@@ -2059,7 +2059,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
                     r8 = state.registers[9]  # a1
                     r9 = state.registers[10]  # a2
                     r10 = state.registers[11]  # a3
-                    println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r7=$r7 r8=$r8 r9=$r9 r10=$r10")
+                    # println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r7=$r7 r8=$r8 r9=$r9 r10=$r10")
                 end
             end
             step!(state)
@@ -2071,13 +2071,13 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
             # Handle host call with provided context
             host_call_id = Int(state.host_call_id)
             # Log ALL host calls to catch any failures
-            if host_call_id != 1  # Skip FETCH logging (already logged separately)
-                println("      [HOST CALL] step=$step_count, id=$host_call_id, PC=0x$(string(pc_before, base=16)), r7=$(state.registers[8]), r8=$(state.registers[9]), r9=$(state.registers[10]), r10=$(state.registers[11])")
-            end
+            # if host_call_id != 1  # Skip FETCH logging (already logged separately)
+            #     println("      [HOST CALL] step=$step_count, id=$host_call_id, PC=0x$(string(pc_before, base=16)), r7=$(state.registers[8]), r8=$(state.registers[9]), r9=$(state.registers[10]), r10=$(state.registers[11])")
+            # end
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
-            if host_call_id != 1
-                println("      [HOST CALL AFTER] step=$step_count, id=$host_call_id, status=$(state.status), r8=$(state.registers[8])")
-            end
+            # if host_call_id != 1
+            #     println("      [HOST CALL AFTER] step=$step_count, id=$host_call_id, status=$(state.status), r8=$(state.registers[8])")
+            # end
 
             # Resume execution if no error
             if state.status == HOST
@@ -2150,14 +2150,14 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     ro_data_start = UInt32(ZONE_SIZE)  # Start at 0x10000
     ro_data_end = ro_data_start + UInt32(length(ro_data))
 
-    # Per graypaper eq:memlayout: rw_data starts at 2*ZONE_SIZE + rnq(len(o))
-    rw_data_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data)))
+    # Per reference implementation (Go), NOT graypaper!
+    # rw_data_address = 2*ZONE_SIZE (fixed, NOT offset by rnq(ro_data))
+    # rw_data_address_end = rw_data_address + rnq(o_size)
+    # heap_ptr = rw_data_address_end + PAGE_SIZE
+    rw_data_start = UInt32(2 * ZONE_SIZE)  # Fixed at 0x20000
     rw_data_end = rw_data_start + UInt32(length(rw_data))
-
-    # Heap pointer per graypaper eq:memlayout: h = 2*ZONE_SIZE + rnq(len(o)) + rnp(len(w))
-    # The z*PAGE_SIZE is the SIZE of pre-allocated heap, not added to the pointer!
-    # rnp rounds to PAGE boundary, rnq rounds to ZONE boundary
-    heap_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data))) + P_func(UInt32(length(rw_data)))
+    rw_data_buffer_end = rw_data_start + rnq(UInt32(length(ro_data)))
+    heap_start = rw_data_buffer_end + UInt32(PAGE_SIZE)
     state.memory.current_heap_pointer = heap_start
 
     # Pre-allocate heap pages for SBRK (z pages worth)
@@ -2165,6 +2165,7 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
 
     println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
     println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16))")
+    println("  [MEM SETUP] rw_data_buffer_end: 0x$(string(rw_data_buffer_end, base=16))")
     println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
     println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
 
@@ -2194,7 +2195,7 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
 
     # Input at high memory per graypaper Y function
     input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
-    println("  [MEM SETUP] input: 0x$(string(input_start, base=16)) ($(length(input)) bytes)")
+    # println("  [MEM SETUP] input: 0x$(string(input_start, base=16)) ($(length(input)) bytes)")
 
     # Write input to high memory
     for i in 1:min(length(input), MAX_INPUT)
@@ -2209,7 +2210,7 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     # Stack region: below input, per graypaper SP = 2^32 - 2*ZONE_SIZE - MAX_INPUT
     stack_top = UInt32(UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT))
     stack_bottom = stack_top - UInt32(max(stack_bytes, 1024 * 1024))  # Use actual stack size or 1MB min
-    println("  [MEM SETUP] stack: 0x$(string(stack_bottom, base=16))-0x$(string(stack_top, base=16))")
+    # println("  [MEM SETUP] stack: 0x$(string(stack_bottom, base=16))-0x$(string(stack_top, base=16))")
 
     for page in div(stack_bottom, PAGE_SIZE):div(stack_top, PAGE_SIZE)
         if page + 1 <= length(state.memory.access)
