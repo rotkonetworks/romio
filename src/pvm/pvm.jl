@@ -2025,9 +2025,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     # Per graypaper Y function (eq:registers):
     # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (argument pointer)
     # r8 = len(input) (argument length)
-    # However, JAM SDK services appear to use r8 as input address for their ABI
     registers[8] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r7 (input address)
-    registers[9] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r8 = input_addr (JAM SDK ABI)
+    registers[9] = UInt64(length(input))  # r8 = input length per graypaper
 
     # initialize state
     state = PVMState(
@@ -2076,7 +2075,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
             # end
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
             # if host_call_id != 1
-            #     println("      [HOST CALL AFTER] step=$step_count, id=$host_call_id, status=$(state.status), r8=$(state.registers[8])")
+            #     println("      [HOST CALL AFTER] step=$step_count, id=$host_call_id, status=$(state.status), r7=$(state.registers[8])")
             # end
 
             # Resume execution if no error
