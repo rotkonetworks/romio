@@ -281,18 +281,51 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
     # All host calls cost at least 10 gas (base cost)
     # Additional costs may be added by specific functions
 
-    # Debug: trace ALL host calls for debugging
-    # println("  [HOST] call_id=$call_id at gas=$(state.gas), r7=$(state.registers[8]), r8=$(state.registers[9])")
+    # Debug: trace ALL host calls
+    step = get(task_local_storage(), :pvm_step_count, 0)
+    if call_id <= 25  # Real host calls
+        host_names = ["GAS", "FETCH", "LOOKUP", "READ", "WRITE", "INFO", "EMIT", "7", "MACHINE", "PEEK", "POKE", "INVOKE", "PAGES", "EXPUNGE", "BLESS", "ASSIGN", "DESIGNATE", "CHECKPOINT", "NEW", "UPGRADE", "TRANSFER", "QUIT", "SOLICIT", "FORGET", "HISTORICAL_LOOKUP"]
+        name = call_id < length(host_names) ? host_names[call_id + 1] : "UNKNOWN"
+        println("    [HOST CALL step=$step] id=$call_id ($name) invocation=$invocation_type")
+    elseif call_id == 100
+        println("    [HOST CALL step=$step] id=100 (LOG) invocation=$invocation_type")
+    else
+        println("    [HOST CALL step=$step] id=$call_id (UNKNOWN) invocation=$invocation_type")
+    end
+
+    # Detailed logging for specific calls
+    if call_id == WRITE
+        println("      WRITE: key_addr=$(state.registers[8]), key_len=$(state.registers[9]), val_addr=$(state.registers[10]), val_len=$(state.registers[11])")
+    elseif call_id == READ
+        println("      READ: key_addr=$(state.registers[8]), key_len=$(state.registers[9]), out_addr=$(state.registers[10])")
+    elseif call_id == BLESS
+        println("      BLESS: Creating checkpoint")
+    elseif call_id == CHECKPOINT
+        println("      CHECKPOINT: Creating exceptional_state checkpoint")
+    end
 
     if call_id == 100
-        # Test-only host call
-        state.gas -= 10
-        if state.gas < 0
-            state.status = :oog
-            return state
+        # LOG host call - debug logging (gas cost: 0)
+        # Input: r7 = message pointer, r8 = message length
+        # Output: none (no side effects on invalid memory access)
+        msg_ptr = state.registers[8]   # r7
+        msg_len = state.registers[9]   # r8
+
+        # Debug: show LOG parameters
+        println("      LOG params: ptr=0x$(string(msg_ptr, base=16)), len=$msg_len")
+
+        # No gas cost for LOG
+        # Try to read and print the log message
+        if msg_len > 0 && msg_len < 1024 && msg_ptr + msg_len <= length(state.memory.data)
+            msg_bytes = state.memory.data[(Int(msg_ptr) + 1):(Int(msg_ptr + msg_len))]
+            # Filter to printable ASCII
+            msg_str = String([b >= 32 && b < 127 ? Char(b) : '.' for b in msg_bytes])
+            println("      [LOG] $msg_str")
+        else
+            println("      [LOG] (invalid: len=$msg_len)")
         end
-        state.registers[8] = 0  # Return OK (0)
-        # Status remains :host so execution resumes
+
+        # LOG has no output registers, just return
         return state
     end
 

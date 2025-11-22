@@ -324,14 +324,12 @@ end
         page_idx = page + 1
         if page_idx > length(state.memory.access)
             state.status = FAULT
-            state.pc = page * PAGE_SIZE
             return UInt8(0)
         end
 
         access = state.memory.access[page_idx]
         if access != READ && access != WRITE
             state.status = FAULT
-            state.pc = page * PAGE_SIZE
             return UInt8(0)
         end
 
@@ -354,13 +352,11 @@ end
         page_idx = page + 1
         if page_idx > length(state.memory.access)
             state.status = FAULT
-            state.pc = page * PAGE_SIZE
             return
         end
 
         if state.memory.access[page_idx] != WRITE
             state.status = FAULT
-            state.pc = page * PAGE_SIZE
             return
         end
 
@@ -383,6 +379,7 @@ end
 
 # Optimized: inline loop for small writes
 @inline function write_bytes(state::PVMState, addr::UInt64, data::Vector{UInt8})
+    # Disabled stack frame tracing
     @inbounds for i in 1:length(data)
         write_u8(state, addr + UInt64(i - 1), data[i])
         if state.status != CONTINUE
@@ -1165,6 +1162,10 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         immx = decode_immediate(state, 2, lx)
         addr = state.registers[rb + 1] + immx
         bytes = read_bytes(state, addr, 4)
+        if length(bytes) < 4
+            state.status = FAULT
+            return
+        end
         val = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
         # Log indirect loads near error
         step = get(task_local_storage(), :pvm_step_count, 0)
@@ -1192,11 +1193,11 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         # If read failed (returned fewer than 8 bytes), register not updated and status already set
         if length(bytes) == 8
             val = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
-            # Log indirect loads near error
-            step = get(task_local_storage(), :pvm_step_count, 0)
-            if (step >= 1 && step < 50) || (step >= 260 && step < 280)
-                println("    [LOAD_IND_U64] step=$step rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
-            end
+            # Debug logging disabled
+            # step = get(task_local_storage(), :pvm_step_count, 0)
+            # if (step >= 1 && step < 50) || (step >= 240 && step < 260) || step == 969
+            #     println("    [LOAD_IND_U64] step=$step ra=$ra rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val (0x$(string(val, base=16)))")
+            # end
             state.registers[ra + 1] = val
         end
         
@@ -1976,8 +1977,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
     return (state.status, output, gas_used, state.exports)
 end
 
-# Overload with context parameter
-function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context, entry_point::Int = 0)
+# Overload with context parameter and optional r0 value
+function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context, entry_point::Int = 0, r0_value::Union{UInt32, Nothing} = nothing)
     result = deblob(program)
     if result === nothing
         return (PANIC, UInt8[], 0, Vector{UInt8}[])
@@ -2008,16 +2009,25 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     end
 
     # Initialize registers per graypaper Y function (equation \ref{eq:registers})
-    # r0 = 2^32 - 2^16
+    # r0 = 2^32 - 2^16 (default) or custom value for specific invocations
     # r1 (SP) = 2^32 - 2*ZONE_SIZE - MAX_INPUT
     # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (input address)
     # r8 = len(input) (input length)
     # others = 0
     registers = zeros(UInt64, 13)
-    registers[1] = UInt64(2^32 - 2^16)  # r0
+    if r0_value !== nothing
+        # For accumulate, r0 might be timeslot or other context
+        registers[1] = UInt64(r0_value)
+    else
+        registers[1] = UInt64(2^32 - 2^16)  # r0 default
+    end
     registers[2] = UInt64(2^32 - 2*ZONE_SIZE - MAX_INPUT)  # r1/SP
+    # Per graypaper Y function (eq:registers):
+    # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (argument pointer)
+    # r8 = len(input) (argument length)
+    # However, JAM SDK services appear to use r8 as input address for their ABI
     registers[8] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r7 (input address)
-    registers[9] = UInt64(length(input))  # r8 (input length)
+    registers[9] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r8 = input_addr (JAM SDK ABI)
 
     # initialize state
     state = PVMState(
@@ -2047,27 +2057,11 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         # Store step count for debug logging
         task_local_storage(:pvm_step_count, step_count)
 
-        if step_count >= 930 && step_count <= 940
-            if state.pc + 1 <= length(state.instructions)
-                opcode = state.instructions[state.pc + 1]
-                println("      [LOOP START] step=$step_count, status=$(state.status), PC=0x$(string(state.pc, base=16)), opcode=0x$(string(opcode, base=16))")
-            else
-                println("      [LOOP START] step=$step_count, status=$(state.status), PC=0x$(string(state.pc, base=16)) BEYOND CODE")
-            end
-        end
+        # Debug trace disabled
+        # if step_count >= 979 && step_count <= 990
+        #     ...
+        # end
         if state.status == CONTINUE
-            # Trace all steps for debugging
-            if step_count < 100
-                if state.pc + 1 <= length(state.instructions)
-                    opcode = state.instructions[state.pc + 1]
-                    r1 = state.registers[2]  # SP
-                    r7 = state.registers[8]  # a0
-                    r8 = state.registers[9]  # a1
-                    r9 = state.registers[10]  # a2
-                    r10 = state.registers[11]  # a3
-                    # println("  [TRACE] step=$step_count PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r1=$r1 r7=$r7 r8=$r8 r9=$r9 r10=$r10")
-                end
-            end
             step!(state)
             step_count += 1
         elseif state.status == HOST
@@ -2103,9 +2097,6 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
             end
         else
             # HALT, PANIC, OOG, FAULT - stop execution
-            if step_count == 936
-                println("      [BREAK AT 936] status=$(state.status)")
-            end
             break
         end
 
@@ -2131,7 +2122,16 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         println("WARNING: PVM hit step limit of $max_steps steps")
     end
     if state.status == FAULT
-        println("PVM execution FAULTED at PC=$(state.pc), steps=$step_count, gas_used=$gas_used")
+        println("PVM execution FAULTED at PC=0x$(string(state.pc, base=16)), steps=$step_count, gas_used=$gas_used")
+    elseif state.status == PANIC
+        pc_idx = state.pc + 1
+        opcode = pc_idx <= length(state.instructions) ? state.instructions[pc_idx] : 0
+        println("PVM execution PANICKED at PC=0x$(string(state.pc, base=16)) opcode=$opcode, steps=$step_count, gas_used=$gas_used")
+        # Debug: show register values at panic
+        println("  Registers at panic:")
+        for i in 0:12
+            println("    r$i = 0x$(string(state.registers[i+1], base=16, pad=16))")
+        end
     else
         println("PVM execution complete: status=$(state.status), steps=$step_count, gas_used=$gas_used")
     end
@@ -2141,9 +2141,10 @@ end
 function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UInt8}, rw_data::Vector{UInt8}, stack_pages::Int, stack_bytes::Int)
     # Memory layout per graypaper Y function (equation 765, memlayout):
     # Zone 0: 0x00000-0x0FFFF (forbidden - first 64KB)
-    # ro_data: ZONE_SIZE to ZONE_SIZE + len(o)
-    # rw_data: 2*ZONE_SIZE + rnq(len(o)) to 2*ZONE_SIZE + rnq(len(o)) + len(w)
-    # Heap: 2*ZONE_SIZE + rnq(len(o)) + rnq(len(w)) + z*PAGE_SIZE
+    # Code: ZONE_SIZE to ZONE_SIZE + len(code)
+    # ro_data: ZONE_SIZE + len(code) to ZONE_SIZE + len(code) + len(o)
+    # rw_data: 2*ZONE_SIZE to 2*ZONE_SIZE + len(w)
+    # Heap: 2*ZONE_SIZE + rnq(len(o)) + PAGE_SIZE
     # Stack: high memory below input
     # Input: 2^32 - ZONE_SIZE - MAX_INPUT
 
@@ -2153,7 +2154,16 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
         return (x + zone_mask) & ~zone_mask
     end
 
-    ro_data_start = UInt32(ZONE_SIZE)  # Start at 0x10000
+    # Write code (instructions) to memory at 0x10000
+    # The program can read from code as data (embedded constants)
+    code_start = UInt32(ZONE_SIZE)  # 0x10000
+    instructions = state.instructions
+    for i in 1:length(instructions)
+        state.memory.data[code_start + i] = instructions[i]
+    end
+
+    # ro_data follows code
+    ro_data_start = code_start + UInt32(length(instructions))
     ro_data_end = ro_data_start + UInt32(length(ro_data))
 
     # Per reference implementation (Go), NOT graypaper!
@@ -2181,10 +2191,14 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     end
 
     # Debug: verify write
-    # if length(ro_data) > 0x900
-    #     written_addr = UInt32(0x10000 + 0x900)
-    #     written_val = state.memory.data[written_addr + 1]  # Fixed: add +1 for 1-indexing
-    #     println("  [MEM WRITE] Wrote to addr 0x$(string(written_addr, base=16)): value=0x$(string(written_val, base=16, pad=2))")
+    # if length(ro_data) > 0x910
+    #     for test_offset in [0x900, 0x910, 0x918]
+    #         written_addr = UInt32(0x10000 + test_offset)
+    #         written_val = state.memory.data[written_addr + 1]  # Fixed: add +1 for 1-indexing
+    #         expected_val = ro_data[test_offset + 1]
+    #         match_str = written_val == expected_val ? "✓" : "✗ MISMATCH"
+    #         println("  [MEM] addr 0x$(string(written_addr, base=16)): wrote=0x$(string(written_val, base=16, pad=2)) expected=0x$(string(expected_val, base=16, pad=2)) $match_str")
+    #     end
     # end
 
     # Write rw_data to zone 2 (0x20000+)
@@ -2192,8 +2206,13 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
         state.memory.data[rw_data_start + i] = rw_data[i]  # Fixed: was + i - 1, now + i
     end
 
-    # Mark ro_data pages as readable
-    for page in div(ro_data_start, PAGE_SIZE):div(ro_data_end - 1, PAGE_SIZE)
+    # Mark code + ro_data pages as readable
+    # Per graypaper, Zone 1 (0x10000-0x1ffff) is for code+ro_data
+    # Mark entire zone 1 as readable (16 pages = 64KB)
+    code_page_start = div(code_start, PAGE_SIZE)  # Page 16
+    zone1_end_page = div(UInt32(2*ZONE_SIZE) - 1, PAGE_SIZE)  # Page 31
+    # println("  [MEM SETUP] Marking zone 1 pages $code_page_start to $zone1_end_page as READ (code=$(length(instructions)) bytes, ro_data=$(length(ro_data)) bytes)")
+    for page in code_page_start:zone1_end_page
         if page + 1 <= length(state.memory.access)
             state.memory.access[page + 1] = READ
         end
@@ -2215,9 +2234,9 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
         state.memory.data[input_start + i] = input[i]  # Fixed: was + i - 1, now + i
     end
 
-    # Mark input pages as readable
+    # Mark input/output pages as writable (program reads input and writes output here)
     for page in div(input_start, PAGE_SIZE):div(input_start + length(input), PAGE_SIZE)
-        state.memory.access[page + 1] = READ
+        state.memory.access[page + 1] = WRITE
     end
 
     # Stack region: below input, per graypaper SP = 2^32 - 2*ZONE_SIZE - MAX_INPUT
@@ -2230,6 +2249,32 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
             state.memory.access[page + 1] = WRITE
         end
     end
+
+    # Initialize stack with "caller frame" for entry point
+    # Different services expect different stack layouts:
+    # Service 0/1: reads from SP + 1168, 1176, 1184
+    # Service 1729: reads from SP + 32, 40, 48, 56
+    sp = stack_top
+    return_addr = UInt64(0xFFFF0000)  # Halt address
+    input_addr = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)
+    input_len = UInt64(length(input))
+
+    # Service 0/1: Write return address at SP + 1184
+    for i in 0:7
+        state.memory.data[sp + 1184 + i + 1] = UInt8((return_addr >> (8*i)) & 0xFF)
+    end
+
+    # Service 1729 stack initialization:
+    # Entry prologue: r10=[SP+32], r7=[SP+40]-r5, r9=[SP+48]-r5, r8=[SP+56]
+    # With r5=0: r10=[SP+32], r7=[SP+40], r9=[SP+48], r8=[SP+56]
+    # Checks: r7 != 0 → error, r9 < 32 → error
+    #
+    # Leave [SP+32] = 0 (function pointer for r10 - will cause panic but error path is longer)
+    # Leave [SP+40] = 0 for r7=0 (OK status)
+    # Leave [SP+48] = 0 - program takes error path (r9<32) which runs 274 steps before panic
+    # Leave [SP+56] = 0 for r8
+    #
+    # The proper ABI for service 1729 needs to be determined from the JAM SDK
 end
 
 function extract_output(state::PVMState)

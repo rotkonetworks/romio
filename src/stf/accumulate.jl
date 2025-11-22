@@ -67,14 +67,16 @@ function execute_accumulate(
     account::ServiceAccount,
     state::State,
     current_slot::TimeSlot
-)::Tuple{ServiceAccount, Bool}
+)::Tuple{ServiceAccount, Dict{ServiceId, ServiceAccount}, Bool}
     # Get service code from preimages
     if !haskey(account.preimages, work_result.code_hash)
         # Code not available
-        return (account, false)
+        println("  [ACCUMULATE] Code not available for hash $(bytes2hex(work_result.code_hash))")
+        return (account, state.accounts, false)
     end
 
     service_code = account.preimages[work_result.code_hash]
+    println("  [ACCUMULATE] Executing service $(work_result.service_id) with code hash $(bytes2hex(work_result.code_hash))")
 
     # Create implications context
     implications = ImplicationsContext(
@@ -84,6 +86,7 @@ function execute_accumulate(
         state.privileges,
         current_slot
     )
+    println("  [ACCUMULATE] Initial exceptional_state: $(implications.exceptional_state !== nothing)")
 
     # Build operandtuple for FETCH access
     # Per graypaper: operandtuple = (package_hash, seg_root, authorizer, payload_hash, gas_limit, auth_trace, result)
@@ -105,20 +108,22 @@ function execute_accumulate(
     # gas_limit (8 bytes, little-endian u64) - from work_result
     append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))
 
-    # auth_trace (raw blob, maybe not JAM-encoded?) - TODO: get from work_report if available
-    append!(operandtuple_encoded, UInt8[])  # empty for now
+    # auth_trace - encoded as JAM blob (length-prefixed)
+    # TODO: get from work_report.auth_output if available
+    auth_trace = UInt8[]  # empty for now
+    append!(operandtuple_encoded, encode_jam_blob(auth_trace))
 
-    # result (raw blob, maybe not JAM-encoded?) - from work_result
-    append!(operandtuple_encoded, work_result.result.ok)
+    # result - encoded as JAM blob (length-prefixed)
+    append!(operandtuple_encoded, encode_jam_blob(work_result.result.ok))
 
-    # println("  [ACCUMULATE] Operandtuple ($(length(operandtuple_encoded)) bytes): $(bytes2hex(operandtuple_encoded))")
-    # println("    package_hash: $(bytes2hex(work_report.package_hash))")
-    # println("    seg_root: $(bytes2hex(work_report.seg_root))")
-    # println("    authorizer: $(bytes2hex(work_report.authorizer_hash))")
-    # println("    payload_hash: $(bytes2hex(work_result.payload_hash))")
-    # println("    gas_limit: $(work_result.accumulate_gas)")
-    # println("    auth_trace: (empty)")
-    # println("    result: $(bytes2hex(work_result.result.ok))")
+    println("  [ACCUMULATE] Operandtuple ($(length(operandtuple_encoded)) bytes): $(bytes2hex(operandtuple_encoded))")
+    println("    package_hash: $(bytes2hex(work_report.package_hash))")
+    println("    seg_root: $(bytes2hex(work_report.seg_root))")
+    println("    authorizer: $(bytes2hex(work_report.authorizer_hash))")
+    println("    payload_hash: $(bytes2hex(work_result.payload_hash))")
+    println("    gas_limit: $(work_result.accumulate_gas)")
+    println("    auth_trace: (empty)")
+    println("    result: $(bytes2hex(work_result.result.ok))")
 
     # Create work package context for FETCH host call
     work_package = Dict{Symbol, Any}(
@@ -132,34 +137,36 @@ function execute_accumulate(
     # If refine succeeded (ok), pass the result; if it failed (error), skip accumulate
     if !haskey(work_result.result, :ok)
         # Refine failed - skip accumulate
-        return (account, false)
+        return (account, state.accounts, false)
     end
 
-    # Per graypaper: input = encode(timeslot, service_id, work_result_count)
-    # For this work report with 1 result for this service
-    input_timeslot = current_slot
-    input_service_id = work_result.service_id
+    # Per graypaper: for accumulate, input = encode{timeslot, service_id, len(operand_tuples)}
+    # This is a 12-byte buffer with three u32 LE values
+    input_timeslot = UInt32(current_slot)
+    input_service_id = UInt32(work_result.service_id)
     input_count = UInt32(1)  # This work result count
 
-    # JAM encode: compact encoding of (timeslot, service_id, count)
-    # Concatenate three compact-encoded integers
+    # Build 12-byte input buffer: [timeslot, service_id, count] as u32 LE
     input = UInt8[]
-    append!(input, encode_jam_compact(input_timeslot))
-    append!(input, encode_jam_compact(input_service_id))
-    append!(input, encode_jam_compact(input_count))
+    append!(input, reinterpret(UInt8, [input_timeslot]))
+    append!(input, reinterpret(UInt8, [input_service_id]))
+    append!(input, reinterpret(UInt8, [input_count]))
 
-    # println("  [ACCUMULATE] Input: encode($input_timeslot, $input_service_id, $input_count) = $(bytes2hex(input))")
-    # println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
+    println("  [ACCUMULATE] Input: timeslot=$input_timeslot, service_id=$input_service_id, count=$input_count ($(length(input)) bytes)")
+    println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
 
     # Execute PVM with accumulate invocation type
-    # Per graypaper: accumulate uses entry point 5
+    # Per graypaper \Psi_M invocation: accumulate uses entry point 5
+    # Entry points: 0=is_authorized, 5=accumulate (Ψ_A), 10=refine (Ψ_R), 15=on_transfer (Ψ_T)
+    # r0 should stay at default (0xFFFF0000), not timeslot
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,
             input,
             UInt64(work_result.accumulate_gas),
             context,
-            5  # Entry point 5 - accumulate per graypaper
+            5,  # Entry point 5 - accumulate (Ψ_A) per graypaper
+            nothing  # r0 = default (0xFFFF0000)
         )
 
         # println("  [EXECUTE] status=$status, PVM.PANIC=$(PVM.PANIC), PVM.HALT=$(PVM.HALT)")
@@ -169,19 +176,25 @@ function execute_accumulate(
         #     println("  [EXECUTE] implications.exceptional_state.self.storage items: $(length(implications.exceptional_state.self.storage))")
         # end
 
-        # Per graypaper: on exceptional exit (panic/oog), use imY state
-        # On normal exit (halt), use imX state
+        # Per graypaper: on exceptional exit, use appropriate state
+        # PANIC/OOG: use imY (exceptional_state) - checkpoint state
+        # FAULT: use imX (current state) - work done before fault
+        # HALT: use imX (current state) with last_acc updated
         if status == PVM.PANIC || status == PVM.OOG
-            # Exceptional exit - use imY (exceptional_state) per graypaper
-            # Do NOT update last_acc on panic - return unchanged account
+            # Exceptional exit (panic/oog) - use imY (exceptional_state) per graypaper
+            # Do NOT update last_acc on exceptional exit
             if implications.exceptional_state !== nothing
-                # Use the exceptional state (imY)
-                return (implications.exceptional_state.self, true)
+                # Use the exceptional state (imY) - state at last checkpoint
+                return (implications.exceptional_state.self, implications.exceptional_state.accounts, true)
             else
-                # No exceptional state means service panicked before checkpoint
+                # No exceptional state means service failed before checkpoint
                 # Return original account unchanged
-                return (account, false)
+                return (account, state.accounts, false)
             end
+        elseif status == PVM.FAULT
+            # Memory fault - use imX (current state) with work done before fault
+            # Do NOT update last_acc on fault
+            return (implications.self, implications.accounts, true)
         elseif status == PVM.HALT
             # Normal exit - use imX state
             # Update last_acc to current slot (graypaper: accountspostxfer)
@@ -201,10 +214,10 @@ function execute_accumulate(
                 UInt32(current_slot),  # Update last_acc to current slot
                 implications.self.parent
             )
-            return (updated_account, true)
+            return (updated_account, implications.accounts, true)
         else
             # Unknown status - return unchanged account
-            return (account, false)
+            return (account, state.accounts, false)
         end
     catch e
         # PVM exception error
@@ -234,7 +247,7 @@ function execute_accumulate(
             Base.show_backtrace(stdout, catch_backtrace()[1:min(10, length(catch_backtrace()))])
             println()
         end
-        return (account, false)
+        return (account, state.accounts, false)
     end
 end
 
@@ -291,17 +304,21 @@ function process_accumulate(
 
             # Execute PVM accumulate invocation
             # println("  [ACCUMULATE] Processing queued work for service $(work_result.service_id)")
-            updated_account, success = execute_accumulate(work_result, parsed_report, account, state, slot)
+            updated_account, updated_accounts, success = execute_accumulate(work_result, parsed_report, account, state, slot)
             if success
+                # Merge updated accounts (includes deletions from EJECT)
+                new_accounts = updated_accounts
                 new_accounts[work_result.service_id] = updated_account
             end
         end
     end
 
     # Process each incoming work report
-    for json_report in reports
+    println("  [DEBUG] Processing $(length(reports)) incoming reports")
+    for (ri, json_report) in enumerate(reports)
         # Parse work report from JSON
         report = parse_work_report(json_report)
+        println("  [DEBUG] Report $ri: $(length(report.results)) results, $(length(report.prerequisites)) prerequisites")
 
         # Check if report has unmet prerequisites
         # TODO: implement proper prerequisite checking against state
@@ -316,6 +333,7 @@ function process_accumulate(
             # Get service account
             if !haskey(new_accounts, work_result.service_id)
                 # Service doesn't exist - skip
+                println("  [SKIP] Service $(work_result.service_id) not in accounts")
                 continue
             end
 
@@ -324,13 +342,17 @@ function process_accumulate(
             # Verify code hash matches
             if account.code_hash != work_result.code_hash
                 # Code hash mismatch - skip
+                println("  [SKIP] Code hash mismatch for service $(work_result.service_id)")
+                println("    Account: $(bytes2hex(account.code_hash))")
+                println("    Work:    $(bytes2hex(work_result.code_hash))")
                 continue
             end
 
             # Execute PVM accumulate invocation
-            updated_account, success = execute_accumulate(work_result, report, account, state, slot)
+            updated_account, updated_accounts, success = execute_accumulate(work_result, report, account, state, slot)
             if success
-                # Replace account with updated version
+                # Merge updated accounts (includes deletions from EJECT)
+                new_accounts = updated_accounts
                 new_accounts[work_result.service_id] = updated_account
             end
         end
