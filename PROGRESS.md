@@ -6,7 +6,10 @@
 1. ✅ Accumulate entry point corrected to 5 (was 10)
 2. ✅ Account deletion propagation from implications.accounts to state
 3. ✅ r8 register = input length per graypaper Y function spec
-4. ✅ Memory layout: rw_data at fixed 0x20000 confirmed correct
+4. ✅ Memory layout fixed per graypaper eq 770-801:
+   - ro_data at 0x10000 (was putting code there incorrectly)
+   - rw_data at 0x20000 + rnq(len(ro_data))
+   - Code is in state.instructions, NOT in RAM
 
 ### Test Results Analysis
 
@@ -58,11 +61,13 @@
 
 **Service 1729:**
 - Takes error path immediately (LOG with len=0 at step 48)
-- Indicates missing/incorrect data in memory or registers
-- Possible issues:
-  - Stack initialization (service expects data at SP+offsets)
-  - Input format/encoding mismatch
-  - Memory layout incompatibility with bootstrap service expectations
+- Root cause found: service checks r6 register at startup
+  - Entry point 5 code: `r7 = r6 << 32; r7 = r7 >> 32; if r7 == 0: jump error`
+  - Graypaper eq 803-811 says r6 = 0, so branch always taken
+  - After memory layout fix: FAULT at step 986 (was PANIC at step 263)
+- Open question: what should r6 contain?
+  - Graypaper says 0, but service expects non-zero
+  - May be a service-specific ABI or invocation context parameter
 
 **Bootstrap Services:**
 - Return error codes without processing

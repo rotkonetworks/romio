@@ -2025,6 +2025,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     # Per graypaper Y function (eq:registers):
     # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (argument pointer)
     # r8 = len(input) (argument length)
+    # registers[7] = UInt64(entry_point)  # r6 - testing hypothesis (didn't work)
     registers[8] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r7 (input address)
     registers[9] = UInt64(length(input))  # r8 = input length per graypaper
 
@@ -2056,10 +2057,35 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         # Store step count for debug logging
         task_local_storage(:pvm_step_count, step_count)
 
-        # Debug trace disabled
-        # if step_count >= 979 && step_count <= 990
-        #     ...
-        # end
+        # Debug trace - print every instruction for first 60 steps
+        if TRACE_EXECUTION && step_count < 60
+            pc_idx = state.pc + 1
+            opcode = pc_idx <= length(state.instructions) ? state.instructions[pc_idx] : 0
+            # Show step, PC, opcode, and key registers
+            r7 = state.registers[8]
+            r8 = state.registers[9]
+            r10 = state.registers[11]
+            println("    [STEP $step_count] PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r7=$(r7) r8=$(r8) r10=$(r10)")
+
+            # For load instructions in critical range, show what's in memory
+            if step_count >= 32 && step_count <= 40 && opcode == 0x7b  # load_u32
+                # Show memory content at r1 (SP) which is the base for stack loads
+                r1 = state.registers[2]  # r1 is SP
+                addr = UInt32(r1 % 2^32)
+                if addr >= 0x10000 && addr + 64 <= 2^32
+                    println("      -> r1(SP)=0x$(string(addr, base=16)), stack contents:")
+                    for offset in [0, 8, 16, 24, 48, 56]
+                        if addr + offset + 4 <= 2^32
+                            val = UInt32(state.memory.data[addr + offset + 1]) |
+                                  (UInt32(state.memory.data[addr + offset + 2]) << 8) |
+                                  (UInt32(state.memory.data[addr + offset + 3]) << 16) |
+                                  (UInt32(state.memory.data[addr + offset + 4]) << 24)
+                            println("         [SP+$offset] = 0x$(string(val, base=16, pad=8))")
+                        end
+                    end
+                end
+            end
+        end
         if state.status == CONTINUE
             step!(state)
             step_count += 1
@@ -2138,14 +2164,14 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 end
 
 function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UInt8}, rw_data::Vector{UInt8}, stack_pages::Int, stack_bytes::Int)
-    # Memory layout per graypaper Y function (equation 765, memlayout):
+    # Memory layout per graypaper Y function (equation 770-801):
     # Zone 0: 0x00000-0x0FFFF (forbidden - first 64KB)
-    # Code: ZONE_SIZE to ZONE_SIZE + len(code)
-    # ro_data: ZONE_SIZE + len(code) to ZONE_SIZE + len(code) + len(o)
-    # rw_data: 2*ZONE_SIZE to 2*ZONE_SIZE + len(w)
-    # Heap: 2*ZONE_SIZE + rnq(len(o)) + PAGE_SIZE
+    # ro_data: ZONE_SIZE to ZONE_SIZE + len(o)  [eq 772-775]
+    # rw_data: 2*ZONE_SIZE + rnq(len(o)) to 2*ZONE_SIZE + rnq(len(o)) + len(w)  [eq 780-783]
+    # Heap: after rw_data
     # Stack: high memory below input
     # Input: 2^32 - ZONE_SIZE - MAX_INPUT
+    # NOTE: Code (instructions) is NOT in RAM - it's in state.instructions
 
     # Helper: round up to next zone boundary (rnq)
     function rnq(x::UInt32)::UInt32
@@ -2153,40 +2179,37 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
         return (x + zone_mask) & ~zone_mask
     end
 
-    # Write code (instructions) to memory at 0x10000
-    # The program can read from code as data (embedded constants)
-    code_start = UInt32(ZONE_SIZE)  # 0x10000
-    instructions = state.instructions
-    for i in 1:length(instructions)
-        state.memory.data[code_start + i] = instructions[i]
-    end
-
-    # ro_data follows code
-    ro_data_start = code_start + UInt32(length(instructions))
+    # Per graypaper: ro_data at 0x10000, NOT code
+    # Code is read from state.instructions, not from memory
+    ro_data_start = UInt32(ZONE_SIZE)  # 0x10000
     ro_data_end = ro_data_start + UInt32(length(ro_data))
 
-    # Per reference implementation (Go), NOT graypaper!
-    # rw_data_address = 2*ZONE_SIZE (fixed, NOT offset by rnq(ro_data))
-    # rw_data_address_end = rw_data_address + rnq(o_size)
-    # heap_ptr = rw_data_address_end + PAGE_SIZE
-    rw_data_start = UInt32(2 * ZONE_SIZE)  # Fixed at 0x20000
+    # Per graypaper equation 780-783:
+    # rw_data at 2*ZONE_SIZE + rnq(len(ro_data))
+    rw_data_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data)))
     rw_data_end = rw_data_start + UInt32(length(rw_data))
-    rw_data_buffer_end = rw_data_start + rnq(UInt32(length(ro_data)))
-    heap_start = rw_data_buffer_end + UInt32(PAGE_SIZE)
-    state.memory.current_heap_pointer = heap_start
 
-    # Pre-allocate heap pages for SBRK (z pages worth)
-    heap_prealloc_end = heap_start + UInt32(stack_pages * PAGE_SIZE)
+    # Helper: round up to page boundary (rnp)
+    function rnp(x::UInt32)::UInt32
+        page_mask = UInt32(PAGE_SIZE - 1)
+        return (x + page_mask) & ~page_mask
+    end
 
-    # println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
-    # println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16))")
-    # println("  [MEM SETUP] rw_data_buffer_end: 0x$(string(rw_data_buffer_end, base=16))")
-    # println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
-    # println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
+    # Heap starts after rw_data region (with z pages for SBRK)
+    heap_start = rw_data_start + rnp(UInt32(length(rw_data))) + UInt32(stack_pages * PAGE_SIZE)
+    state.memory.current_heap_pointer = rw_data_start + rnp(UInt32(length(rw_data)))
 
-    # Write ro_data to zone 1 (0x10000+)
+    # Pre-allocate heap pages
+    heap_prealloc_end = heap_start
+
+    println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
+    println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16)) ($(length(rw_data)) bytes)")
+    println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
+    println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
+
+    # Write ro_data to zone 1 (0x10000+) per graypaper eq 772-775
     for i in 1:length(ro_data)
-        state.memory.data[ro_data_start + i] = ro_data[i]  # Fixed: was + i - 1, now + i
+        state.memory.data[ro_data_start + i] = ro_data[i]
     end
 
     # Debug: verify write
@@ -2205,13 +2228,13 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
         state.memory.data[rw_data_start + i] = rw_data[i]  # Fixed: was + i - 1, now + i
     end
 
-    # Mark code + ro_data pages as readable
-    # Per graypaper, Zone 1 (0x10000-0x1ffff) is for code+ro_data
-    # Mark entire zone 1 as readable (16 pages = 64KB)
-    code_page_start = div(code_start, PAGE_SIZE)  # Page 16
-    zone1_end_page = div(UInt32(2*ZONE_SIZE) - 1, PAGE_SIZE)  # Page 31
-    # println("  [MEM SETUP] Marking zone 1 pages $code_page_start to $zone1_end_page as READ (code=$(length(instructions)) bytes, ro_data=$(length(ro_data)) bytes)")
-    for page in code_page_start:zone1_end_page
+    # Mark ro_data pages as readable
+    # Per graypaper eq 772-779, Zone 1 (0x10000-0x1ffff) is for ro_data
+    # Mark ro_data pages as readable
+    ro_page_start = div(ro_data_start, PAGE_SIZE)  # Page 16
+    ro_page_end = div(ro_data_start + rnp(UInt32(length(ro_data))) - 1, PAGE_SIZE)
+    println("  [MEM SETUP] Marking ro_data pages $ro_page_start to $ro_page_end as READ ($(length(ro_data)) bytes)")
+    for page in ro_page_start:ro_page_end
         if page + 1 <= length(state.memory.access)
             state.memory.access[page + 1] = READ
         end

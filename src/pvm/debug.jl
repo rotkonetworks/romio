@@ -5,7 +5,7 @@ module PVMDebug
 
 # Execution tracing
 const TRACE_EXECUTION = false  # Print every instruction step
-const TRACE_HOST_CALLS = true  # Print host call invocations
+const TRACE_HOST_CALLS = false  # Print host call invocations
 const TRACE_FETCH = false       # Print FETCH host call details
 const TRACE_MEMORY = false      # Print memory operations
 
