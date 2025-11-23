@@ -1119,8 +1119,12 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         val = state.registers[ra + 1]
+        addr = state.registers[rb + 1] + immx
+        if TRACE_EXECUTION
+            println("    [STORE_IND_U64] val=0x$(string(val, base=16)) to addr=0x$(string(addr, base=16)) (r$(rb)+$(immx))")
+        end
         bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:7]
-        write_bytes(state, state.registers[rb + 1] + immx, bytes)
+        write_bytes(state, addr, bytes)
         
     elseif opcode == 124  # load_ind_u8
         ra = get_register_index(state, 1, 0)
@@ -1480,7 +1484,13 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         offset = decode_offset(state, 2, lx)
-        if state.registers[ra + 1] >= state.registers[rb + 1]
+        va = state.registers[ra + 1]
+        vb = state.registers[rb + 1]
+        taken = va >= vb
+        if TRACE_EXECUTION
+            println("    [BRANCH_GE_U] r$(ra)($(va)) >= r$(rb)($(vb)) = $(taken), offset=$(offset)")
+        end
+        if taken
             state.pc = UInt32((Int32(state.pc) + offset) % 2^32)
         else
             state.pc += 1 + skip
@@ -2025,7 +2035,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     # Per graypaper Y function (eq:registers):
     # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (argument pointer)
     # r8 = len(input) (argument length)
-    # registers[7] = UInt64(entry_point)  # r6 - testing hypothesis (didn't work)
+    # r6 = 0 (graypaper compliant, though test-service may expect different)
     registers[8] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r7 (input address)
     registers[9] = UInt64(length(input))  # r8 = input length per graypaper
 
@@ -2061,11 +2071,11 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         if TRACE_EXECUTION && step_count < 60
             pc_idx = state.pc + 1
             opcode = pc_idx <= length(state.instructions) ? state.instructions[pc_idx] : 0
-            # Show step, PC, opcode, and key registers
-            r7 = state.registers[8]
-            r8 = state.registers[9]
-            r10 = state.registers[11]
-            println("    [STEP $step_count] PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2)) r7=$(r7) r8=$(r8) r10=$(r10)")
+            # Show all registers for full visibility
+            regs = ["r$(i-1)=$(state.registers[i])" for i in 1:13]
+            println("    [STEP $step_count] PC=0x$(string(state.pc, base=16, pad=4)) op=0x$(string(opcode, base=16, pad=2))")
+            println("      $(join(regs[1:7], " "))")
+            println("      $(join(regs[8:13], " "))")
 
             # For load instructions in critical range, show what's in memory
             if step_count >= 32 && step_count <= 40 && opcode == 0x7b  # load_u32
@@ -2199,8 +2209,8 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     heap_start = rw_data_start + rnp(UInt32(length(rw_data))) + UInt32(stack_pages * PAGE_SIZE)
     state.memory.current_heap_pointer = rw_data_start + rnp(UInt32(length(rw_data)))
 
-    # Pre-allocate heap pages
-    heap_prealloc_end = heap_start
+    # Pre-allocate heap pages (at least one zone)
+    heap_prealloc_end = heap_start + UInt32(ZONE_SIZE)
 
     println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
     println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16)) ($(length(rw_data)) bytes)")

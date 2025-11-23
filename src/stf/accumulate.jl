@@ -152,13 +152,12 @@ function execute_accumulate(
     append!(input, reinterpret(UInt8, [input_service_id]))
     append!(input, reinterpret(UInt8, [input_count]))
 
-    println("  [ACCUMULATE] Input: timeslot=$input_timeslot, service_id=$input_service_id, count=$input_count ($(length(input)) bytes)")
+    println("  [ACCUMULATE] Input: timeslot=$input_timeslot, service_id=$input_service_id, count=1 ($(length(input)) bytes)")
     println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
 
     # Execute PVM with accumulate invocation type
     # Per graypaper \Psi_M invocation: accumulate uses entry point 5
     # Entry points: 0=is_authorized, 5=accumulate (Ψ_A), 10=refine (Ψ_R), 15=on_transfer (Ψ_T)
-    # r0 should stay at default (0xFFFF0000), not timeslot
     try
         status, output, gas_used, exports = PVM.execute(
             service_code,

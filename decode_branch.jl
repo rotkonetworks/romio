@@ -1,79 +1,48 @@
-#!/usr/bin/env julia
+# Decode the conditional branch at step 2
+
+push!(LOAD_PATH, joinpath(@__DIR__, "src"))
+
 include("src/pvm/pvm.jl")
-using JSON3
+using .PVM
 
-data = JSON3.read(read("jam-test-vectors/stf/accumulate/tiny/process_one_immediate_report-1.json", String))
+# Load service code
+include("src/test_vectors/loader.jl")
+test_path = "jam-test-vectors/stf/accumulate/full/process_one_immediate_report-1.json"
+tv = load_test_vector(test_path)
 
-for acc in data[:pre_state][:accounts]
-    if acc[:id] == 1729
-        for preimage in acc[:data][:preimages_blob]
-            if length(preimage[:blob]) > 10000
-                blob_hex = preimage[:blob]
-                hex_str = blob_hex[3:end]
-                blob = [parse(UInt8, hex_str[i:i+1], base=16) for i in 1:2:length(hex_str)]
-                
-                result = PVM.deblob(blob)
-                if result !== nothing
-                    instructions, opcode_mask, jump_table, ro_data, rw_data, stack_pages, stack_bytes = result
-                    
-                    # Decode branch_ne_imm at PC=0x372
-                    pc = 0x372
-                    opcode = instructions[pc + 1]
-                    skip = PVM.skip_distance(opcode_mask, pc + 1)
-                    
-                    println("Instruction at PC=0x$(string(pc, base=16)):")
-                    println("  opcode: $opcode (branch_ne_imm)")
-                    println("  skip: $skip")
-                    
-                    # Raw bytes
-                    bytes = instructions[(pc+1):min(pc+6, length(instructions))]
-                    println("  bytes: $(join(["0x$(string(b, base=16, pad=2))" for b in bytes], ", "))")
-                    
-                    # Decode ra and lx
-                    reg_byte = instructions[pc + 2]
-                    ra = reg_byte & 0x0F  # Low nibble
-                    lx_nibble = (reg_byte >> 4) & 0x07  # Bits 4-6
-                    lx = Int(min(4, lx_nibble))
-                    ly = max(0, skip - lx - 1)
-                    
-                    println("  ra: $ra (r$ra)")
-                    println("  lx: $lx, ly: $ly")
-                    
-                    # Decode immx (value to compare against)
-                    immx = UInt64(0)
-                    for j in 0:lx-1
-                        if pc + 2 + j < length(instructions)
-                            byte = instructions[pc + 2 + j + 1]
-                            immx |= UInt64(byte) << (8*j)
-                        end
-                    end
-                    if lx > 0 && (immx >> (8*lx - 1)) & 1 == 1
-                        immx |= ~((UInt64(1) << (8*lx)) - 1)
-                    end
-                    
-                    # Decode immy (branch offset)
-                    immy = Int64(0)
-                    for j in 0:ly-1
-                        if pc + 2 + lx + j < length(instructions)
-                            byte = instructions[pc + 2 + lx + j + 1]
-                            immy |= Int64(byte) << (8*j)
-                        end
-                    end
-                    if ly > 0 && (immy >> (8*ly - 1)) & 1 == 1
-                        immy |= ~((Int64(1) << (8*ly)) - 1)
-                    end
-                    
-                    target = pc + immy
-                    
-                    println("  immx: $immx (compare value)")
-                    println("  immy: $immy (offset)")
-                    println("  target: 0x$(string(target, base=16))")
-                    println()
-                    println("Semantics: if r$ra != $immx then jump to 0x$(string(target, base=16))")
-                end
-                break
-            end
-        end
-        break
-    end
+service_id = ServiceId(1729)
+account = tv.pre_state.accounts[service_id]
+service_code = account.preimages[account.code_hash]
+
+# Parse the blob
+parsed = PVM.deblob(service_code)
+code, opcode_mask, jump_table = parsed
+
+# Decode branch_eq_imm at PC 0x01b5
+pc = 0x01b5
+println("=== Branch at PC 0x$(string(pc, base=16)) ===")
+bytes = [code[pc + 1 + i] for i in 0:7]
+println("Bytes: ", join(["0x$(string(b, base=16, pad=2))" for b in bytes], " "))
+
+opcode = bytes[1]  # 0x51 = 81 = branch_eq_imm
+println("Opcode: $opcode (branch_eq_imm)")
+
+# Decode according to PVM spec
+ra = bytes[2] & 0x0F
+lx_field = (bytes[2] >> 4) % 8
+skip = PVM.skip_distance(opcode_mask, pc + 1)
+ly = min(4, max(0, skip - lx_field - 1))
+
+println("Register index: $ra")
+println("lx: $lx_field, ly: $ly, skip: $skip")
+
+# Decode immediate
+immx = 0
+for i in 0:lx_field-1
+    immx |= Int(bytes[3 + i]) << (8*i)
 end
+println("Immediate: $immx")
+
+# Expected target from trace: 0x041d
+expected_offset = 0x041d - pc
+println("\nExpected offset: $expected_offset (to reach 0x041d)")

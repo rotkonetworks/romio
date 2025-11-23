@@ -74,8 +74,30 @@
 - May need different ABI or calling convention
 - work_for_ejected_service expects EJECT host call that never happens
 
+### New Findings: Test-Service ABI Incompatibility
+
+**Critical Discovery**: The test-service has a different ABI than graypaper specifies:
+
+1. **r6 register check**: Service checks `if 32 >= r6: error`
+   - Graypaper says r6 = 0 (eq 806)
+   - Service expects r6 > 32
+   - Both services 0-2 and 1729 use the same code (hash: 69076f38...)
+
+2. **r8 as memory address**: Service stores to `r8 + 0`
+   - Graypaper says r8 = input length
+   - Service uses r8 as writable memory base address
+   - Causes PANIC when r8 = 12 (address 12 is in forbidden zone)
+
+3. **Store instruction**: Opcode 0x7b = store_ind_u64
+   - Stores r9 value (0x31021) to address r8 + immx
+   - With graypaper r8 = 12, address = 12 = forbidden zone → PANIC
+
+**Passing tests pass because**:
+- They have prerequisites, so service code isn't executed
+- Test expectations account for the faulting behavior
+
 ### Next Steps
-1. Investigate service 1729's early error detection - what data is it checking?
-2. Compare register/stack values with reference implementation  
-3. Research bootstrap service ABI requirements
-4. Consider if tests require features not yet implemented (e.g., ready queue processing)
+1. Find test-service source code or documentation for actual ABI
+2. Compare with polkavm or other reference implementations
+3. Consider if graypaper has different invocation conventions not yet implemented
+4. Check if jam-test-vectors have a companion implementation to reference
