@@ -10,3 +10,19 @@ src/pvm/test_export.jl
 src/pvm/test_export_simple.jl
 src/pvm/test_export_working.jl
 src/pvm/test_host_calls_debug.jl
+
+# Debug scripts (keep root clean)
+analyze_*.jl
+check_*.jl
+decode_*.jl
+trace_*.jl
+test_*.jl
+extract_*.jl
+find_*.jl
+list_*.jl
+run_*.jl
+*.asm
+*.bin
+*.polkavm
+*.pvm
+trace_*.txt
