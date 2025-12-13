@@ -106,11 +106,13 @@ function parse_service_account(json_data)::ServiceAccount
         end
     end
 
-    # Load preimages if present (check both :preimages and :preimages_blob)
+    # Load preimages if present (check all possible field names)
     preimage_field = if haskey(json_data, :preimages)
         :preimages
     elseif haskey(json_data, :preimages_blob)
         :preimages_blob
+    elseif haskey(json_data, :preimage_blobs)
+        :preimage_blobs
     else
         nothing
     end
@@ -123,9 +125,17 @@ function parse_service_account(json_data)::ServiceAccount
         end
     end
 
-    # Load preimage metadata (lookup_meta) if present
-    if haskey(json_data, :lookup_meta)
-        for item in json_data[:lookup_meta]
+    # Load preimage metadata (lookup_meta or preimage_requests) if present
+    requests_field = if haskey(json_data, :lookup_meta)
+        :lookup_meta
+    elseif haskey(json_data, :preimage_requests)
+        :preimage_requests
+    else
+        nothing
+    end
+
+    if requests_field !== nothing
+        for item in json_data[requests_field]
             hash = parse_hex(item[:key][:hash])
             preimage_length = UInt64(item[:key][:length])
             timeslots = UInt64.(get(item, :value, UInt64[]))

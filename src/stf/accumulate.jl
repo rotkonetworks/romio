@@ -48,6 +48,10 @@ function parse_work_report(json_report)
     package_spec = json_report[:package_spec]
     package_hash = parse_hex(package_spec[:hash])
     erasure_root = parse_hex(package_spec[:erasure_root])  # Used as seg_root
+    exports_root = parse_hex(package_spec[:exports_root])  # Used in operand encoding
+
+    # Parse authorization output if available
+    auth_output = haskey(json_report, :auth_output) ? parse_hex(json_report[:auth_output]) : UInt8[]
 
     return (
         results = results,
@@ -57,6 +61,8 @@ function parse_work_report(json_report)
         prerequisites = prerequisites,
         package_hash = package_hash,
         seg_root = erasure_root,
+        exports_root = exports_root,
+        auth_output = auth_output,
     )
 end
 
@@ -70,9 +76,26 @@ function execute_accumulate(
 )::Tuple{ServiceAccount, Dict{ServiceId, ServiceAccount}, Bool}
     # Get service code from preimages
     if !haskey(account.preimages, work_result.code_hash)
-        # Code not available
+        # Code not available - still update last_acc per graypaper
         println("  [ACCUMULATE] Code not available for hash $(bytes2hex(work_result.code_hash))")
-        return (account, state.accounts, false)
+        # Create updated account with last_acc set to current slot
+        updated_account = ServiceAccount(
+            account.code_hash,
+            account.storage,
+            account.preimages,
+            account.requests,
+            account.balance,
+            account.min_balance,
+            account.min_acc_gas,
+            account.min_memo_gas,
+            account.octets,
+            account.items,
+            account.gratis,
+            account.created,
+            UInt32(current_slot),  # Update last_acc to current slot
+            account.parent
+        )
+        return (updated_account, state.accounts, true)  # true = success (account was updated)
     end
 
     service_code = account.preimages[work_result.code_hash]
@@ -88,33 +111,39 @@ function execute_accumulate(
     )
     println("  [ACCUMULATE] Initial exceptional_state: $(implications.exceptional_state !== nothing)")
 
-    # Build operandtuple for FETCH access
-    # Per graypaper: operandtuple = (package_hash, seg_root, authorizer, payload_hash, gas_limit, auth_trace, result)
-    # All fields must be SCALE-encoded and come from work_report
+    # Build operandtuple (Operand) for FETCH access
+    # Per graypaper Operand codec:
+    #   hash (32 bytes) - WorkPackageHash
+    #   exportsRoot (32 bytes) - ExportsRootHash
+    #   authorizerHash (32 bytes)
+    #   payloadHash (32 bytes)
+    #   gas (varU64) - ServiceGas
+    #   result (WorkExecResult.Codec) - kind (varU32) + blob if ok
+    #   authorizationOutput (blob)
     operandtuple_encoded = UInt8[]
 
-    # package_hash (32 bytes) - from work_report.package_spec
+    # hash (32 bytes) - WorkPackageHash from work_report.package_spec
     append!(operandtuple_encoded, work_report.package_hash)
 
-    # seg_root (32 bytes) - from work_report.package_spec.erasure_root
-    append!(operandtuple_encoded, work_report.seg_root)
+    # exportsRoot (32 bytes) - from work_report.package_spec.exports_root
+    append!(operandtuple_encoded, work_report.exports_root)
 
-    # authorizer (32 bytes) - from work_report
+    # authorizerHash (32 bytes) - from work_report
     append!(operandtuple_encoded, work_report.authorizer_hash)
 
-    # payload_hash (32 bytes) - from work_result
+    # payloadHash (32 bytes) - from work_result
     append!(operandtuple_encoded, work_result.payload_hash)
 
-    # gas_limit (8 bytes, little-endian u64) - from work_result
-    append!(operandtuple_encoded, reinterpret(UInt8, [UInt64(work_result.accumulate_gas)]))
+    # gas (varU64) - JAM compact encoded
+    append!(operandtuple_encoded, encode_jam_compact(work_result.accumulate_gas))
 
-    # auth_trace - encoded as JAM blob (length-prefixed)
-    # TODO: get from work_report.auth_output if available
-    auth_trace = UInt8[]  # empty for now
-    append!(operandtuple_encoded, encode_jam_blob(auth_trace))
-
-    # result - encoded as JAM blob (length-prefixed)
+    # result (WorkExecResult.Codec) - kind (varU32) + blob if ok
+    # kind=0 means "ok", followed by the blob
+    append!(operandtuple_encoded, encode_jam_compact(0))  # kind = ok
     append!(operandtuple_encoded, encode_jam_blob(work_result.result.ok))
+
+    # authorizationOutput (blob) - from work_report.auth_output
+    append!(operandtuple_encoded, encode_jam_blob(work_report.auth_output))
 
     println("  [ACCUMULATE] Operandtuple ($(length(operandtuple_encoded)) bytes): $(bytes2hex(operandtuple_encoded))")
     println("    package_hash: $(bytes2hex(work_report.package_hash))")
@@ -140,19 +169,20 @@ function execute_accumulate(
         return (account, state.accounts, false)
     end
 
-    # Per graypaper: for accumulate, input = encode{timeslot, service_id, len(operand_tuples)}
-    # This is a 12-byte buffer with three u32 LE values
-    input_timeslot = UInt32(current_slot)
+    # Per graypaper: accumulate input = encode{slot, serviceId, argsLength}
+    # All fields use JAM compact encoding (varU32)
+    # Operand tuples are accessed via FETCH host call, not inline
+    input_slot = UInt32(current_slot)
     input_service_id = UInt32(work_result.service_id)
-    input_count = UInt32(1)  # This work result count
+    input_count = 1  # Number of operand tuples (work results)
 
-    # Build 12-byte input buffer: [timeslot, service_id, count] as u32 LE
+    # Build input buffer: just the header
     input = UInt8[]
-    append!(input, reinterpret(UInt8, [input_timeslot]))
-    append!(input, reinterpret(UInt8, [input_service_id]))
-    append!(input, reinterpret(UInt8, [input_count]))
+    append!(input, encode_jam_compact(input_slot))
+    append!(input, encode_jam_compact(input_service_id))
+    append!(input, encode_jam_compact(input_count))
 
-    println("  [ACCUMULATE] Input: timeslot=$input_timeslot, service_id=$input_service_id, count=1 ($(length(input)) bytes)")
+    println("  [ACCUMULATE] Input: slot=$input_slot, service_id=$input_service_id, count=$input_count ($(length(input)) bytes)")
     println("  [ACCUMULATE] Account balance=$(account.balance), min_acc_gas=$(account.min_acc_gas), items=$(account.items)")
 
     # Execute PVM with accumulate invocation type
@@ -165,7 +195,8 @@ function execute_accumulate(
             UInt64(work_result.accumulate_gas),
             context,
             5,  # Entry point 5 - accumulate (Ψ_A) per graypaper
-            nothing  # r0 = default (0xFFFF0000)
+            nothing,  # r0 = default (0xFFFF0000)
+            nothing   # r6 = 0 (count is in input buffer, not r6)
         )
 
         # println("  [EXECUTE] status=$status, PVM.PANIC=$(PVM.PANIC), PVM.HALT=$(PVM.HALT)")
@@ -178,41 +209,51 @@ function execute_accumulate(
         # Per graypaper: on exceptional exit, use appropriate state
         # PANIC/OOG: use imY (exceptional_state) - checkpoint state
         # FAULT: use imX (current state) - work done before fault
-        # HALT: use imX (current state) with last_acc updated
+        # HALT: use imX (current state)
+        # Per graypaper: last_acc is ALWAYS updated when accumulate runs,
+        # regardless of exit status (tracked in statistics for any service with count>0 or gas>0)
+
+        # Helper to create account with updated last_acc
+        function update_last_acc(acct::ServiceAccount, slot::UInt32)
+            ServiceAccount(
+                acct.code_hash,
+                acct.storage,
+                acct.preimages,
+                acct.requests,
+                acct.balance,
+                acct.min_balance,
+                acct.min_acc_gas,
+                acct.min_memo_gas,
+                acct.octets,
+                acct.items,
+                acct.gratis,
+                acct.created,
+                slot,  # Update last_acc to current slot
+                acct.parent
+            )
+        end
+
         if status == PVM.PANIC || status == PVM.OOG
             # Exceptional exit (panic/oog) - use imY (exceptional_state) per graypaper
-            # Do NOT update last_acc on exceptional exit
             if implications.exceptional_state !== nothing
                 # Use the exceptional state (imY) - state at last checkpoint
-                return (implications.exceptional_state.self, implications.exceptional_state.accounts, true)
+                # But still update last_acc since accumulate was invoked
+                updated_account = update_last_acc(implications.exceptional_state.self, UInt32(current_slot))
+                return (updated_account, implications.exceptional_state.accounts, true)
             else
                 # No exceptional state means service failed before checkpoint
-                # Return original account unchanged
-                return (account, state.accounts, false)
+                # Still update last_acc since accumulate was invoked
+                updated_account = update_last_acc(account, UInt32(current_slot))
+                return (updated_account, state.accounts, true)
             end
         elseif status == PVM.FAULT
             # Memory fault - use imX (current state) with work done before fault
-            # Do NOT update last_acc on fault
-            return (implications.self, implications.accounts, true)
+            # Still update last_acc since accumulate was invoked
+            updated_account = update_last_acc(implications.self, UInt32(current_slot))
+            return (updated_account, implications.accounts, true)
         elseif status == PVM.HALT
-            # Normal exit - use imX state
-            # Update last_acc to current slot (graypaper: accountspostxfer)
-            updated_account = ServiceAccount(
-                implications.self.code_hash,
-                implications.self.storage,
-                implications.self.preimages,
-                implications.self.requests,
-                implications.self.balance,
-                implications.self.min_balance,
-                implications.self.min_acc_gas,
-                implications.self.min_memo_gas,
-                implications.self.octets,
-                implications.self.items,
-                implications.self.gratis,
-                implications.self.created,
-                UInt32(current_slot),  # Update last_acc to current slot
-                implications.self.parent
-            )
+            # Normal exit - use imX state with last_acc updated
+            updated_account = update_last_acc(implications.self, UInt32(current_slot))
             return (updated_account, implications.accounts, true)
         else
             # Unknown status - return unchanged account

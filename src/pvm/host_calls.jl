@@ -26,6 +26,9 @@ include("../crypto/Blake2b.jl")
 # These types are now centralized in src/types/accumulate.jl
 include("../types/accumulate.jl")
 
+# Import JAM encoding functions for FETCH and other host calls
+include("../encoding/jam.jl")
+
 # ===== Host Call IDs =====
 # General functions (available in all contexts)
 const GAS = 0
@@ -480,28 +483,35 @@ function host_call_fetch(state, context, invocation_type)
             data = encode_work_package(context.work_package)
         end
     elseif selector == 14
-        # All accumulate inputs (work results) encoded: encode(var(i))
+        # All accumulate inputs (transfers and operands) encoded: E(↕i)
+        # Per graypaper: TRANSFERS_AND_OPERANDS = sequenceVarLen(TRANSFER_OR_OPERAND)
+        # Each TRANSFER_OR_OPERAND = kind (varU32) + value
+        # kind=0 for OPERAND, kind=1 for TRANSFER
         if context.work_package !== nothing && haskey(context.work_package, :results)
             results = context.work_package[:results]
-            # Encode as JAM sequence: JAM compact length + items
-            include("../encoding/jam.jl")
+            # Encode as JAM sequence: length + items
             data = UInt8[]
-            # Encode length as JAM compact integer
+            # Encode sequence length as JAM compact integer
             append!(data, encode_jam_compact(length(results)))
-            # Append each result (each is already JAM-encoded operandtuple)
+            # Append each result as TransferOrOperand (kind=0 + Operand)
             for result in results
-                # Each result is a blob, encode with JAM var(x) = len + data
-                append!(data, encode_jam_blob(result))
+                # kind = 0 (OPERAND)
+                append!(data, encode_jam_compact(0))
+                # Operand data (already JAM-encoded)
+                append!(data, result)
             end
             println("    [FETCH] selector=14 (all inputs) returned $(length(results)) items, $(length(data)) bytes total")
         end
     elseif selector == 15
-        # Specific accumulate input at index idx1: encode(i[idx1])
+        # Specific accumulate input at index idx1: E(i[idx1])
+        # Per graypaper: TRANSFER_OR_OPERAND = kind (varU32) + value
         if context.work_package !== nothing && haskey(context.work_package, :results)
             results = context.work_package[:results]
             if idx1 < length(results)
-                # Julia is 1-indexed, return the raw operandtuple (already JAM-encoded)
-                data = results[idx1 + 1]
+                # Encode as TransferOrOperand: kind=0 (OPERAND) + Operand
+                data = UInt8[]
+                append!(data, encode_jam_compact(0))  # kind = OPERAND
+                append!(data, results[idx1 + 1])  # Operand data
                 println("    [FETCH] selector=15 (input[$idx1]) returned $(length(data)) bytes")
             else
                 println("    [FETCH] selector=15 (input[$idx1]) OUT OF BOUNDS (have $(length(results)) items)")
@@ -854,10 +864,13 @@ function host_call_write(state, context)
     if value_length == 0
         # Delete the key
         if haskey(account.storage, key)
+            # Save old value length BEFORE deleting
+            old_val = account.storage[key]
+            old_val_len = length(old_val)
             delete!(account.storage, key)
             account.items -= 1
             # Update octets (remove key and value sizes)
-            account.octets -= UInt64(34 + length(key) + length(account.storage[key]))
+            account.octets -= UInt64(34 + length(key) + old_val_len)
         end
     else
         # Check if value memory is readable
@@ -932,7 +945,8 @@ function host_call_info(state, context)
     copy_length = state.registers[11]      # r10
 
     # Determine which service account to query
-    if context === nothing || context.accounts === nothing
+    # Accounts are accessed via context.implications.accounts
+    if context === nothing || context.implications === nothing || context.implications.accounts === nothing
         state.registers[8] = NONE
         return state
     end
@@ -945,12 +959,12 @@ function host_call_info(state, context)
     end
 
     # Look up the account
-    if !haskey(context.accounts, target_service_id)
+    if !haskey(context.implications.accounts, target_service_id)
         state.registers[8] = NONE
         return state
     end
 
-    account = context.accounts[target_service_id]
+    account = context.implications.accounts[target_service_id]
 
     # Encode account info according to spec:
     # code_hash (32 bytes) + balance (8) + min_balance (8) + min_acc_gas (8) + min_memo_gas (8) + octets (8) +

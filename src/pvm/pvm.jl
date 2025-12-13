@@ -36,14 +36,197 @@ const READ = :R
 const WRITE = :W
 const NONE = nothing
 
+# Cache-optimized sparse memory with two-level page table
+# Level 1: 1024 entries (covers 4GB with 4MB L1 entries)
+# Level 2: 1024 pages per L1 entry (4KB pages)
+# Total: 1M pages = 4GB address space
+const L1_BITS = 10  # 1024 L1 entries
+const L2_BITS = 10  # 1024 L2 entries per L1
+const PAGE_BITS = 12  # 4KB pages (must match PAGE_SIZE = 4096)
+const L1_SIZE = 1 << L1_BITS
+const L2_SIZE = 1 << L2_BITS
+const PAGE_MASK = UInt32((1 << PAGE_BITS) - 1)
+const L2_MASK = UInt32((1 << L2_BITS) - 1)
+
+struct SparseMemoryData
+    # Two-level page table: L1[l1_idx] -> L2 array -> page data
+    l1::Vector{Union{Nothing, Vector{Union{Nothing, Vector{UInt8}}}}}
+    # Hot path cache: avoid L1/L2 lookup for repeated accesses to same page
+    cached_page_num::Base.RefValue{UInt32}
+    cached_page::Base.RefValue{Union{Nothing, Vector{UInt8}}}
+end
+
+function SparseMemoryData()
+    l1 = Vector{Union{Nothing, Vector{Union{Nothing, Vector{UInt8}}}}}(nothing, L1_SIZE)
+    SparseMemoryData(l1, Ref(UInt32(0xFFFFFFFF)), Ref{Union{Nothing, Vector{UInt8}}}(nothing))
+end
+
+# Fast page lookup with single-page cache
+@inline function get_page(m::SparseMemoryData, page_num::UInt32)::Union{Nothing, Vector{UInt8}}
+    # Check cache first (hot path - same page as last access)
+    if page_num == m.cached_page_num[]
+        return m.cached_page[]
+    end
+
+    # Two-level lookup using bit operations (no div/mod)
+    l1_idx = (page_num >> L2_BITS) + 1  # 1-indexed
+    l2_idx = (page_num & L2_MASK) + 1   # 1-indexed
+
+    @inbounds begin
+        l2 = m.l1[l1_idx]
+        if l2 === nothing
+            return nothing
+        end
+        page = l2[l2_idx]
+        # Update cache
+        m.cached_page_num[] = page_num
+        m.cached_page[] = page
+        return page
+    end
+end
+
+@inline function get_or_create_page!(m::SparseMemoryData, page_num::UInt32)::Vector{UInt8}
+    l1_idx = (page_num >> L2_BITS) + 1
+    l2_idx = (page_num & L2_MASK) + 1
+
+    @inbounds begin
+        l2 = m.l1[l1_idx]
+        if l2 === nothing
+            l2 = Vector{Union{Nothing, Vector{UInt8}}}(nothing, L2_SIZE)
+            m.l1[l1_idx] = l2
+        end
+
+        page = l2[l2_idx]
+        if page === nothing
+            page = zeros(UInt8, PAGE_SIZE)
+            l2[l2_idx] = page
+        end
+
+        # Update cache
+        m.cached_page_num[] = page_num
+        m.cached_page[] = page
+        return page
+    end
+end
+
+# 1-indexed access (Julia convention) - addr is 1-based
+@inline function Base.getindex(m::SparseMemoryData, addr::Integer)::UInt8
+    addr0 = UInt32(addr - 1)
+    page_num = addr0 >> PAGE_BITS  # Fast bit shift instead of div
+    offset = (addr0 & PAGE_MASK) + 1  # 1-indexed into page
+
+    page = get_page(m, page_num)
+    if page === nothing
+        return UInt8(0)
+    end
+    @inbounds return page[offset]
+end
+
+@inline function Base.setindex!(m::SparseMemoryData, val::UInt8, addr::Integer)
+    addr0 = UInt32(addr - 1)
+    page_num = addr0 >> PAGE_BITS
+    offset = (addr0 & PAGE_MASK) + 1
+
+    page = get_or_create_page!(m, page_num)
+    @inbounds page[offset] = val
+    return val
+end
+
+# Range-based getindex for slice operations like data[offset+1:offset+length]
+@inline function Base.getindex(m::SparseMemoryData, r::UnitRange{<:Integer})::Vector{UInt8}
+    len = length(r)
+    result = Vector{UInt8}(undef, len)
+    for (i, addr) in enumerate(r)
+        result[i] = m[addr]
+    end
+    return result
+end
+
+# Bulk copy operation for copyto!
+@inline function Base.copyto!(m::SparseMemoryData, dest_offset::Integer, src::Vector{UInt8}, src_offset::Integer, count::Integer)
+    for i in 0:count-1
+        m[dest_offset + i] = src[src_offset + i]
+    end
+    return m
+end
+
+# Two-level access permission table (mirrors page table structure)
+struct SparseAccessData
+    l1::Vector{Union{Nothing, Vector{Union{Symbol, Nothing}}}}
+    # Cache last accessed page permission
+    cached_page_idx::Base.RefValue{UInt32}
+    cached_access::Base.RefValue{Union{Symbol, Nothing}}
+end
+
+function SparseAccessData()
+    l1 = Vector{Union{Nothing, Vector{Union{Symbol, Nothing}}}}(nothing, L1_SIZE)
+    SparseAccessData(l1, Ref(UInt32(0xFFFFFFFF)), Ref{Union{Symbol, Nothing}}(nothing))
+end
+
+@inline function Base.getindex(a::SparseAccessData, page_idx::Integer)::Union{Symbol, Nothing}
+    page_idx32 = UInt32(page_idx - 1)  # Convert to 0-based
+
+    # Check cache
+    if page_idx32 == a.cached_page_idx[]
+        return a.cached_access[]
+    end
+
+    l1_idx = (page_idx32 >> L2_BITS) + 1
+    l2_idx = (page_idx32 & L2_MASK) + 1
+
+    @inbounds begin
+        l2 = a.l1[l1_idx]
+        if l2 === nothing
+            return nothing
+        end
+        access = l2[l2_idx]
+        # Update cache
+        a.cached_page_idx[] = page_idx32
+        a.cached_access[] = access
+        return access
+    end
+end
+
+@inline function Base.setindex!(a::SparseAccessData, val::Union{Symbol, Nothing}, page_idx::Integer)
+    page_idx32 = UInt32(page_idx - 1)
+    l1_idx = (page_idx32 >> L2_BITS) + 1
+    l2_idx = (page_idx32 & L2_MASK) + 1
+
+    @inbounds begin
+        l2 = a.l1[l1_idx]
+        if l2 === nothing
+            l2 = Vector{Union{Symbol, Nothing}}(nothing, L2_SIZE)
+            a.l1[l1_idx] = l2
+        end
+        l2[l2_idx] = val
+        # Update cache
+        a.cached_page_idx[] = page_idx32
+        a.cached_access[] = val
+    end
+    return val
+end
+
+# Compatibility with get() for existing code
+@inline function Base.get(a::SparseAccessData, page_idx::Integer, default)
+    result = a[page_idx]
+    return result === nothing ? default : result
+end
+
+# Length returns max addressable pages (for legacy code compatibility)
+# With sparse storage, any page can be allocated
+@inline Base.length(a::SparseAccessData) = L1_SIZE * L2_SIZE  # 1M pages = 4GB
+
+# Also add length for SparseMemoryData for consistency
+@inline Base.length(m::SparseMemoryData) = L1_SIZE * L2_SIZE * PAGE_SIZE  # 4GB
+
 mutable struct Memory
-    data::Vector{UInt8}
-    access::Vector{Union{Symbol, Nothing}}  # per-page access
+    data::SparseMemoryData
+    access::SparseAccessData  # per-page access with two-level table
     current_heap_pointer::UInt32  # Current heap top for sbrk
 
     function Memory()
-        data = zeros(UInt8, 2^32)
-        access = fill(NONE, div(2^32, PAGE_SIZE))
+        data = SparseMemoryData()
+        access = SparseAccessData()
         # Heap pointer will be initialized in setup_memory!
         new(data, access, UInt32(0))
     end
@@ -322,14 +505,10 @@ end
         end
 
         page_idx = page + 1
-        if page_idx > length(state.memory.access)
-            state.status = FAULT
-            return UInt8(0)
-        end
-
-        access = state.memory.access[page_idx]
+        access = get(state.memory.access, page_idx, NONE)
         if access != READ && access != WRITE
             state.status = FAULT
+            state.gas -= 1  # Page faults cost 1 additional gas
             return UInt8(0)
         end
 
@@ -350,13 +529,9 @@ end
         end
 
         page_idx = page + 1
-        if page_idx > length(state.memory.access)
+        if get(state.memory.access, page_idx, NONE) != WRITE
             state.status = FAULT
-            return
-        end
-
-        if state.memory.access[page_idx] != WRITE
-            state.status = FAULT
+            state.gas -= 1  # Page faults cost 1 additional gas
             return
         end
 
@@ -447,6 +622,16 @@ function sign_extend_32(val::UInt32)
     end
 end
 
+# Overload for UInt64 - extract low 32 bits and sign extend
+function sign_extend_32(val::UInt64)
+    low32 = UInt32(val & 0xFFFFFFFF)
+    if low32 & 0x80000000 != 0
+        return UInt64(low32) | 0xFFFFFFFF00000000
+    else
+        return UInt64(low32)
+    end
+end
+
 function to_signed(val::UInt64)
     return reinterpret(Int64, val)
 end
@@ -473,6 +658,7 @@ end
         # bounds check
         pc_idx = Int(state.pc) + 1
         if pc_idx > length(state.instructions)
+            state.gas -= 1  # Charge gas for failed attempt
             state.status = PANIC
             return
         end
@@ -956,9 +1142,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
 
                     # Allocate pages in the new range
                     for page_idx in idx_start:(idx_end-1)
-                        if page_idx + 1 <= length(state.memory.access)
-                            state.memory.access[page_idx + 1] = WRITE
-                        end
+                        state.memory.access[page_idx + 1] = WRITE
                     end
                 end
 
@@ -1037,15 +1221,9 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
             UInt8((val >> 24) & 0xFF)
         ])
 
-    elseif opcode == 0x78  # This appears to be add_32 based on context
-        # Bytes: 0x78 0x05 (rd=5/s0 in low nibble, ra/rb follow)
-        # Next byte has the source registers
-        rd = 5  # s0 is register 5
-        ra = 8  # a0 is register 8
-        rb = 9  # a1 is register 9
-        state.registers[rd + 1] = state.registers[ra + 1] + state.registers[rb + 1]
+    # Note: opcode 0x78 (120) is store_ind_u8, handled below in the 120-161 range
 
-    elseif opcode == 120 && false  # load_i32_ind (load signed 32-bit from [base + offset])
+    elseif opcode == 120 && false  # DISABLED: load_i32_ind (load signed 32-bit from [base + offset])
         rd = get_register_index(state, 1, 0)  # Dest register
         rb = get_register_index(state, 1, 1)  # Base register
         offset = decode_immediate(state, 2, min(skip - 1, 4))
@@ -1077,11 +1255,13 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
             end
         end
 
-    elseif opcode == 0x83  # add_imm
+    elseif opcode == 0x83  # add_imm_32
         rd = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         imm = decode_immediate(state, 2, min(skip - 1, 4))
-        state.registers[rd + 1] = state.registers[rb + 1] + imm
+        # 32-bit add with sign extension (i32 result)
+        result = UInt32((state.registers[rb + 1] + imm) % 2^32)
+        state.registers[rd + 1] = sign_extend_32(result)
 
     # Note: opcode 0x32 (50) is jump_ind, already handled above at line 379
     # The "ret" instruction does not exist in the PVM spec
@@ -1193,16 +1373,18 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         addr = state.registers[rb + 1] + immx
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if TRACE_EXECUTION && step < 30
+            println("    [LOAD_IND_U64] r$ra = [r$rb+$immx] = [0x$(string(UInt32(state.registers[rb + 1] % 2^32), base=16))+$immx] = addr 0x$(string(UInt32(addr % 2^32), base=16))")
+        end
         bytes = read_bytes(state, addr, 8)
         # If read failed (returned fewer than 8 bytes), register not updated and status already set
         if length(bytes) == 8
             val = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
-            # Debug logging disabled
-            # step = get(task_local_storage(), :pvm_step_count, 0)
-            # if (step >= 1 && step < 50) || (step >= 240 && step < 260) || step == 969
-            #     println("    [LOAD_IND_U64] step=$step ra=$ra rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val (0x$(string(val, base=16)))")
-            # end
             state.registers[ra + 1] = val
+            if TRACE_EXECUTION && step < 30
+                println("    [LOAD_IND_U64] loaded value: 0x$(string(val, base=16)) = $(val)")
+            end
         end
         
     elseif opcode == 131  # add_imm_32
@@ -1225,7 +1407,12 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        state.registers[ra + 1] = state.registers[rb + 1] ⊻ immx
+        result = state.registers[rb + 1] ⊻ immx
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if TRACE_EXECUTION && step < 30
+            println("    [XOR_IMM] r$ra = r$rb($(state.registers[rb + 1])) XOR $immx = $result")
+        end
+        state.registers[ra + 1] = result
         
     elseif opcode == 134  # or_imm
         ra = get_register_index(state, 1, 0)
@@ -1280,9 +1467,9 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         shift = immx % 32
-        val = Int32(state.registers[rb + 1] % 2^32)
+        val = reinterpret(Int32, UInt32(state.registers[rb + 1] % 2^32))
         result = val >> shift
-        state.registers[ra + 1] = to_unsigned(Int64(result))
+        state.registers[ra + 1] = sign_extend_32(reinterpret(UInt32, result))
         
     elseif opcode == 141  # neg_add_imm_32
         ra = get_register_index(state, 1, 0)
@@ -1330,9 +1517,9 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         shift = state.registers[rb + 1] % 32
-        val = Int32(immx % 2^32)
+        val = reinterpret(Int32, UInt32(immx % 2^32))
         result = val >> shift
-        state.registers[ra + 1] = to_unsigned(Int64(result))
+        state.registers[ra + 1] = sign_extend_32(reinterpret(UInt32, result))
         
     elseif opcode == 147  # cmov_iz_imm
         ra = get_register_index(state, 1, 0)
@@ -1400,7 +1587,12 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         shift = state.registers[rb + 1] % 64
-        state.registers[ra + 1] = UInt64(immx << shift)
+        result = UInt64(immx << shift)
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if TRACE_EXECUTION && step < 30
+            println("    [SHLO_L_IMM_ALT_64] r$ra = $immx << r$rb($(state.registers[rb + 1])) = 0x$(string(result, base=16))")
+        end
+        state.registers[ra + 1] = result
         
     elseif opcode == 156  # shlo_r_imm_alt_64
         ra = get_register_index(state, 1, 0)
@@ -1515,8 +1707,10 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ly = min(4, max(0, skip - lx - 2))
         immx = decode_immediate(state, 3, lx)
         immy = decode_immediate(state, 3 + lx, ly)
+        # Read rb BEFORE writing to ra (in case ra == rb)
+        rb_val = state.registers[rb + 1]
         state.registers[ra + 1] = immx
-        addr = (state.registers[rb + 1] + immy) % 2^32
+        addr = (rb_val + immy) % 2^32
         if addr == 2^32 - 2^16
             state.status = HALT
         elseif addr == 0 || addr % DYNAM_ALIGN != 0
@@ -1535,14 +1729,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
-        a = Int32(state.registers[ra + 1] % 2^32)
-        b = Int32(state.registers[rb + 1] % 2^32)
+        a = reinterpret(Int32, UInt32(state.registers[ra + 1] % 2^32))
+        b = reinterpret(Int32, UInt32(state.registers[rb + 1] % 2^32))
         if b == 0
-            state.registers[rd + 1] = 2^64 - 1
+            state.registers[rd + 1] = typemax(UInt64)
         elseif a == typemin(Int32) && b == -1
-            state.registers[rd + 1] = to_unsigned(Int64(a))
+            state.registers[rd + 1] = sign_extend_32(reinterpret(UInt32, a))
         else
-            state.registers[rd + 1] = to_unsigned(Int64(div(a, b)))
+            state.registers[rd + 1] = sign_extend_32(reinterpret(UInt32, Int32(div(a, b))))
         end
         
     elseif opcode == 195  # rem_u_32
@@ -1561,13 +1755,16 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
-        a = Int32(state.registers[ra + 1] % 2^32)
-        b = Int32(state.registers[rb + 1] % 2^32)
-        if a == typemin(Int32) && b == -1
+        a = reinterpret(Int32, UInt32(state.registers[ra + 1] % 2^32))
+        b = reinterpret(Int32, UInt32(state.registers[rb + 1] % 2^32))
+        if b == 0
+            # Division by zero returns the dividend
+            state.registers[rd + 1] = sign_extend_32(reinterpret(UInt32, a))
+        elseif a == typemin(Int32) && b == -1
             state.registers[rd + 1] = 0
         else
             result = smod(a, b)
-            state.registers[rd + 1] = to_unsigned(Int64(result))
+            state.registers[rd + 1] = sign_extend_32(reinterpret(UInt32, result))
         end
         
     elseif opcode == 197  # shlo_l_32
@@ -1591,9 +1788,9 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
         shift = state.registers[rb + 1] % 32
-        val = Int32(state.registers[ra + 1] % 2^32)
+        val = reinterpret(Int32, UInt32(state.registers[ra + 1] % 2^32))
         result = val >> shift
-        state.registers[rd + 1] = to_unsigned(Int64(result))
+        state.registers[rd + 1] = sign_extend_32(reinterpret(UInt32, result))
 
     # 200-202 already implemented, continuing from 203:
     elseif opcode == 203  # div_u_64
@@ -1601,7 +1798,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
         if state.registers[rb + 1] == 0
-            state.registers[rd + 1] = 2^64 - 1
+            state.registers[rd + 1] = typemax(UInt64)
         else
             state.registers[rd + 1] = div(state.registers[ra + 1], state.registers[rb + 1])
         end
@@ -1613,7 +1810,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         a = to_signed(state.registers[ra + 1])
         b = to_signed(state.registers[rb + 1])
         if b == 0
-            state.registers[rd + 1] = 2^64 - 1
+            state.registers[rd + 1] = typemax(UInt64)
         elseif a == typemin(Int64) && b == -1
             state.registers[rd + 1] = state.registers[ra + 1]
         else
@@ -1755,7 +1952,12 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
-        state.registers[rd + 1] = state.registers[ra + 1] & ~state.registers[rb + 1]
+        result = state.registers[ra + 1] & ~state.registers[rb + 1]
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if TRACE_EXECUTION && step < 30
+            println("    [AND_INV] r$rd = r$ra(0x$(string(state.registers[ra + 1], base=16))) & ~r$rb(0x$(string(state.registers[rb + 1], base=16))) = 0x$(string(result, base=16))")
+        end
+        state.registers[rd + 1] = result
         
     elseif opcode == 225  # or_inv
         ra = get_register_index(state, 1, 0)
@@ -1831,7 +2033,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rd = get_register_index(state, 2, 0)
         divisor = UInt32(state.registers[rb + 1] % 2^32)
         if divisor == 0
-            state.registers[rd + 1] = 2^64 - 1
+            state.registers[rd + 1] = typemax(UInt64)
         else
             result = div(UInt32(state.registers[ra + 1] % 2^32), divisor)
             state.registers[rd + 1] = sign_extend_32(result)
@@ -1988,7 +2190,8 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
 end
 
 # Overload with context parameter and optional r0 value
-function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context, entry_point::Int = 0, r0_value::Union{UInt32, Nothing} = nothing)
+# r6_value: for accumulate entry point, this should be the work result count
+function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, context, entry_point::Int = 0, r0_value::Union{UInt32, Nothing} = nothing, r6_value::Union{UInt64, Nothing} = nothing)
     result = deblob(program)
     if result === nothing
         return (PANIC, UInt8[], 0, Vector{UInt8}[])
@@ -1997,20 +2200,15 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     instructions, opcode_mask, jump_table, ro_data, rw_data, stack_pages, stack_bytes = result
 
     # Determine starting PC based on entry point
-    # Entry point 0 = start at PC 0
-    # Entry point N (0-indexed) = start at jump_table[N+1] (Julia 1-indexed)
-    start_pc = if entry_point == 0
-        UInt32(0)
-    else
-        if entry_point + 1 > length(jump_table)
-            println("ERROR: Entry point $entry_point requested but jump_table only has $(length(jump_table)) entries")
-            return (PANIC, UInt8[], 0, Vector{UInt8}[])
-        end
-        # Entry point 5 (0-indexed) → jump_table[6] in Julia
-        jump_table[entry_point + 1]
-    end
+    # Per graypaper Section 14, entry points are direct PC addresses:
+    # - 0: is_authorized
+    # - 5: accumulate (Ψ_A)
+    # - 10: refine (Ψ_R)
+    # - 15: on_transfer (Ψ_T)
+    # entry point is used directly as PC, not as jump table index
+    start_pc = UInt32(entry_point)
 
-    # println("  [PVM START] Entry point=$entry_point, start_pc=0x$(string(start_pc, base=16)), jump_table_size=$(length(jump_table)), code_length=$(length(instructions))")
+    println("  [PVM START] Entry point=$entry_point, start_pc=0x$(string(start_pc, base=16)), jump_table_size=$(length(jump_table)), code_length=$(length(instructions))")
 
     # Validate start_pc is within code
     if start_pc >= length(instructions)
@@ -2020,7 +2218,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
 
     # Initialize registers per graypaper Y function (equation \ref{eq:registers})
     # r0 = 2^32 - 2^16 (default) or custom value for specific invocations
-    # r1 (SP) = 2^32 - 2*ZONE_SIZE - MAX_INPUT
+    # r1 (SP) = 2^32 - 2*ZONE_SIZE = 0xfffe0000 (per polkavm abi.rs stack_address_high)
     # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (input address)
     # r8 = len(input) (input length)
     # others = 0
@@ -2031,13 +2229,19 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     else
         registers[1] = UInt64(2^32 - 2^16)  # r0 default
     end
-    registers[2] = UInt64(2^32 - 2*ZONE_SIZE - MAX_INPUT)  # r1/SP
+    registers[2] = UInt64(2^32 - 2*ZONE_SIZE - MAX_INPUT)  # r1/SP = 0xfefe0000 per Go ref impl
     # Per graypaper Y function (eq:registers):
     # r7 = 2^32 - ZONE_SIZE - MAX_INPUT (argument pointer)
     # r8 = len(input) (argument length)
-    # r6 = 0 (graypaper compliant, though test-service may expect different)
-    registers[8] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r7 (input address)
+    # Per graypaper eq 14.2: accumulate input = encode{s, t, n} (12 bytes)
+    # The code reads the count from the input buffer, not from r8
+    registers[8] = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)  # r7 = input pointer (a0)
     registers[9] = UInt64(length(input))  # r8 = input length per graypaper
+
+    # Set r6 for accumulate invocation (work result count)
+    if r6_value !== nothing
+        registers[7] = r6_value  # r6 = work result count (Julia 1-indexed: r6 is registers[7])
+    end
 
     # initialize state
     state = PVMState(
@@ -2194,9 +2398,10 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     ro_data_start = UInt32(ZONE_SIZE)  # 0x10000
     ro_data_end = ro_data_start + UInt32(length(ro_data))
 
-    # Per graypaper equation 780-783:
-    # rw_data at 2*ZONE_SIZE + rnq(len(ro_data))
-    rw_data_start = UInt32(2 * ZONE_SIZE) + rnq(UInt32(length(ro_data)))
+    # Per graypaper eq for w: rw_data starts at 2*ZONE_SIZE + rnq(len(ro_data))
+    # where rnq rounds up to next zone boundary (64KB)
+    # This matches polkavm trace showing rw_data at 0x30000 when ro_data is ~13KB
+    rw_data_start = UInt32(2 * ZONE_SIZE + rnq(UInt32(length(ro_data))))
     rw_data_end = rw_data_start + UInt32(length(rw_data))
 
     # Helper: round up to page boundary (rnp)
@@ -2212,10 +2417,10 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     # Pre-allocate heap pages (at least one zone)
     heap_prealloc_end = heap_start + UInt32(ZONE_SIZE)
 
-    println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
-    println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16)) ($(length(rw_data)) bytes)")
-    println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
-    println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
+    # println("  [MEM SETUP] ro_data: 0x$(string(ro_data_start, base=16))-0x$(string(ro_data_end-1, base=16)) ($(length(ro_data)) bytes)")
+    # println("  [MEM SETUP] rw_data: 0x$(string(rw_data_start, base=16))-0x$(string(rw_data_end-1, base=16)) ($(length(rw_data)) bytes)")
+    # println("  [MEM SETUP] heap_ptr: 0x$(string(state.memory.current_heap_pointer, base=16))")
+    # println("  [MEM SETUP] stack_pages=$stack_pages, stack_bytes=$stack_bytes")
 
     # Write ro_data to zone 1 (0x10000+) per graypaper eq 772-775
     for i in 1:length(ro_data)
@@ -2262,8 +2467,10 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     # println("  [MEM SETUP] input: 0x$(string(input_start, base=16)) ($(length(input)) bytes)")
 
     # Write input to high memory
+    # state.memory.data is 1-indexed, input_start is 0-indexed address
+    # input[1] goes to memory address input_start, which is state.memory.data[input_start + 1]
     for i in 1:min(length(input), MAX_INPUT)
-        state.memory.data[input_start + i] = input[i]  # Fixed: was + i - 1, now + i
+        state.memory.data[input_start + i] = input[i]
     end
 
     # Mark input/output pages as writable (program reads input and writes output here)
@@ -2271,42 +2478,38 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
         state.memory.access[page + 1] = WRITE
     end
 
-    # Stack region: below input, per graypaper SP = 2^32 - 2*ZONE_SIZE - MAX_INPUT
-    stack_top = UInt32(UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT))
+    # Stack region: per Go ref impl, SP = 2^32 - 2*Z_Z - Z_I = 0xfefe0000
+    stack_top = UInt32(UInt64(2^32) - UInt64(2)*UInt64(ZONE_SIZE) - UInt64(MAX_INPUT))  # 0xfefe0000
     stack_bottom = stack_top - UInt32(max(stack_bytes, 1024 * 1024))  # Use actual stack size or 1MB min
     # println("  [MEM SETUP] stack: 0x$(string(stack_bottom, base=16))-0x$(string(stack_top, base=16))")
 
     for page in div(stack_bottom, PAGE_SIZE):div(stack_top, PAGE_SIZE)
-        if page + 1 <= length(state.memory.access)
-            state.memory.access[page + 1] = WRITE
+        state.memory.access[page + 1] = WRITE
+    end
+
+    # Set up stack frame for polkavm ABI compatibility
+    # The test-service's prologue loads saved registers from the stack.
+    args_segment = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)  # 0xfeff0000 (input pointer)
+
+    # Helper to write 8-byte value to stack
+    function write_u64_to_stack(sp::UInt32, offset::Int, value::UInt64)
+        for i in 0:7
+            state.memory.data[sp + offset + i + 1] = UInt8((value >> (8 * i)) & 0xff)
         end
     end
 
-    # Initialize stack with "caller frame" for entry point
-    # Different services expect different stack layouts:
-    # Service 0/1: reads from SP + 1168, 1176, 1184
-    # Service 1729: reads from SP + 32, 40, 48, 56
-    sp = stack_top
-    return_addr = UInt64(0xFFFF0000)  # Halt address
-    input_addr = UInt64(2^32 - ZONE_SIZE - MAX_INPUT)
-    input_len = UInt64(length(input))
+    sp_addr = stack_top  # 0xfefe0000
+    scratch = UInt32(sp_addr - 0x100)  # Writable area below SP
 
-    # Service 0/1: Write return address at SP + 1184
-    for i in 0:7
-        state.memory.data[sp + 1184 + i + 1] = UInt8((return_addr >> (8*i)) & 0xFF)
-    end
-
-    # Service 1729 stack initialization:
-    # Entry prologue: r10=[SP+32], r7=[SP+40]-r5, r9=[SP+48]-r5, r8=[SP+56]
-    # With r5=0: r10=[SP+32], r7=[SP+40], r9=[SP+48], r8=[SP+56]
-    # Checks: r7 != 0 → error, r9 < 32 → error
-    #
-    # Leave [SP+32] = 0 (function pointer for r10 - will cause panic but error path is longer)
-    # Leave [SP+40] = 0 for r7=0 (OK status)
-    # Leave [SP+48] = 0 - program takes error path (r9<32) which runs 274 steps before panic
-    # Leave [SP+56] = 0 for r8
-    #
-    # The proper ABI for service 1729 needs to be determined from the JAM SDK
+    # Populate saved register slots on stack per polkavm calling convention
+    write_u64_to_stack(sp_addr, 0, UInt64(args_segment))    # [SP+0] -> r7 (input ptr)
+    write_u64_to_stack(sp_addr, 8, UInt64(scratch))         # [SP+8] -> r9 (scratch area)
+    write_u64_to_stack(sp_addr, 16, UInt64(0))              # [SP+16] -> count/flags (0 for direct entry)
+    write_u64_to_stack(sp_addr, 24, UInt64(scratch + 64))   # [SP+24] -> scratch area 2
+    write_u64_to_stack(sp_addr, 32, UInt64(0))              # [SP+32] -> r6
+    write_u64_to_stack(sp_addr, 40, UInt64(0))              # [SP+40] -> r5
+    write_u64_to_stack(sp_addr, 48, UInt64(0xFFFF0000))     # [SP+48] -> r0 (return to host)
+    write_u64_to_stack(sp_addr, 56, UInt64(0))              # [SP+56] -> padding
 end
 
 function extract_output(state::PVMState)
@@ -2327,12 +2530,9 @@ function extract_output(state::PVMState)
         addr = output_ptr + i
         page = div(addr, PAGE_SIZE)
 
-        # Check page bounds
-        if page + 1 > length(state.memory.access)
-            return UInt8[]
-        end
-
-        if state.memory.access[page + 1] != READ
+        # Check page access
+        access = get(state.memory.access, page + 1, NONE)
+        if access != READ && access != WRITE
             return UInt8[]
         end
         push!(output, state.memory.data[addr + 1])
