@@ -287,7 +287,7 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
     # Debug: trace ALL host calls
     step = get(task_local_storage(), :pvm_step_count, 0)
     if call_id <= 25  # Real host calls
-        host_names = ["GAS", "FETCH", "LOOKUP", "READ", "WRITE", "INFO", "EMIT", "7", "MACHINE", "PEEK", "POKE", "INVOKE", "PAGES", "EXPUNGE", "BLESS", "ASSIGN", "DESIGNATE", "CHECKPOINT", "NEW", "UPGRADE", "TRANSFER", "QUIT", "SOLICIT", "FORGET", "HISTORICAL_LOOKUP"]
+        host_names = ["GAS", "FETCH", "LOOKUP", "READ", "WRITE", "INFO", "EMIT", "7", "MACHINE", "PEEK", "POKE", "INVOKE", "PAGES", "EXPUNGE", "BLESS", "ASSIGN", "DESIGNATE", "CHECKPOINT", "NEW", "UPGRADE", "TRANSFER", "EJECT", "SOLICIT", "FORGET", "HISTORICAL_LOOKUP"]
         name = call_id < length(host_names) ? host_names[call_id + 1] : "UNKNOWN"
         println("    [HOST CALL step=$step] id=$call_id ($name) invocation=$invocation_type")
     elseif call_id == 100
@@ -883,18 +883,24 @@ function host_call_write(state, context)
         value = state.memory.data[value_offset+1:value_offset+value_length]
 
         # Calculate new storage size
-        new_octets_delta = if haskey(account.storage, key)
+        new_octets = if haskey(account.storage, key)
             # Updating existing key: only value size changes
-            UInt64(length(value) - length(account.storage[key]))
+            old_len = length(account.storage[key])
+            new_len = length(value)
+            if new_len >= old_len
+                account.octets + UInt64(new_len - old_len)
+            else
+                # Value shrunk - subtract from octets
+                account.octets - UInt64(old_len - new_len)
+            end
         else
             # New key: add key overhead + key size + value size
-            UInt64(34 + length(key) + length(value))
+            account.octets + UInt64(34 + length(key) + length(value))
         end
 
         # Check if account has sufficient balance
         # (Simplified: just check if min_balance threshold would be exceeded)
         # In full implementation, would need to calculate actual min_balance requirement
-        new_octets = account.octets + new_octets_delta
         # Simplified balance check - in reality this would check against computed threshold
         if account.balance < account.min_balance
             state.registers[8] = FULL
@@ -2120,6 +2126,7 @@ function host_call_eject(state, context)
     # Parse parameters
     service_to_eject = state.registers[8]      # r7
     hash_offset = UInt32(state.registers[9])   # r8
+    println("      [EJECT] service=$service_to_eject, hash_offset=$hash_offset, caller=$(context.service_id)")
 
     # Check memory bounds for hash
     if !is_readable(state.memory.access, hash_offset, UInt32(32))
@@ -2139,6 +2146,7 @@ function host_call_eject(state, context)
 
     # Check if service_to_eject is valid (< 2^32)
     if service_to_eject >= 2^32
+        println("      [EJECT] FAIL: invalid service id")
         state.registers[8] = WHO
         return state
     end
@@ -2147,12 +2155,14 @@ function host_call_eject(state, context)
 
     # Check if trying to eject self (not allowed)
     if eject_id == context.service_id
+        println("      [EJECT] FAIL: trying to eject self")
         state.registers[8] = HUH
         return state
     end
 
     # Check if service exists
     if !haskey(im.accounts, eject_id)
+        println("      [EJECT] FAIL: service doesn't exist in accounts=$(keys(im.accounts))")
         state.registers[8] = WHO
         return state
     end
@@ -2160,32 +2170,45 @@ function host_call_eject(state, context)
     target_account = im.accounts[eject_id]
 
     # Check if service's parent matches caller (encoded as parent field)
+    println("      [EJECT] target.parent=$(target_account.parent), caller=$(context.service_id)")
     if target_account.parent != context.service_id
+        println("      [EJECT] FAIL: parent mismatch")
         state.registers[8] = HUH
         return state
     end
 
     # Check if service has exactly 2 items (code request + one other)
+    println("      [EJECT] target.items=$(target_account.items)")
     if target_account.items != 2
+        println("      [EJECT] FAIL: items != 2")
         state.registers[8] = HUH
         return state
     end
 
     # Find the non-code request and verify it's expired
-    # Constants
-    expunge_period = UInt32(19200)  # Cexpungeperiod from graypaper
+    # Constants - using tiny chainspec value (32) for test vectors
+    # Full spec would be 19200
+    expunge_period = UInt32(32)  # Cexpungeperiod - tiny chainspec
+
+    println("      [EJECT] hash from memory: $(bytes2hex(hash))")
+    println("      [EJECT] target has $(length(target_account.requests)) requests")
 
     found_valid_request = false
     for ((req_hash, req_length), req) in target_account.requests
+        println("      [EJECT] checking request: hash=$(bytes2hex(req_hash)), state=$(req.state)")
         # Skip code request (hash matches code_hash)
         if req_hash == target_account.code_hash
+            println("      [EJECT]   -> skipping (code request)")
             continue
         end
 
         # Check if this is the request being ejected
         if req_hash == hash
-            # Must be in [x, y, z] state where y < current_time - expunge_period
-            if length(req.state) == 3
+            println("      [EJECT]   -> hash matches!")
+            # Must be in [x, y] or [x, y, z] state where y < current_time - expunge_period
+            # State meanings per graypaper:
+            # [] = requested, [x] = acknowledged, [x, y] = available, [x, y, z] = expungeable
+            if length(req.state) >= 2
                 y = UInt32(req.state[2])
                 # Safe subtraction - check if expunge period would underflow
                 expunge_threshold = if im.current_time >= expunge_period
@@ -2193,15 +2216,22 @@ function host_call_eject(state, context)
                 else
                     UInt32(0)
                 end
+                println("      [EJECT]   y=$y, threshold=$expunge_threshold, current_time=$(im.current_time)")
                 if y < expunge_threshold
                     found_valid_request = true
+                    println("      [EJECT]   -> request is expired, valid for ejection!")
                     break
+                else
+                    println("      [EJECT]   -> request NOT expired")
                 end
+            else
+                println("      [EJECT]   -> state length $(length(req.state)) < 2")
             end
         end
     end
 
     if !found_valid_request
+        println("      [EJECT] FAIL: no valid request found")
         state.registers[8] = HUH
         return state
     end

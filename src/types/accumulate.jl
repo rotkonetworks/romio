@@ -129,7 +129,7 @@ mutable struct ImplicationsContext
     accounts::Dict{ServiceId, ServiceAccount}  # all service accounts
 
     # Accumulation outputs
-    transfers::Vector{DeferredTransfer}  # deferred transfers (xfers)
+    transfers::Vector{Any}  # deferred transfers (xfers) - Any to avoid module type conflicts
     provisions::Set{Tuple{ServiceId, Blob}}  # (service_id, preimage_data)
     yield_hash::Union{Blob, Nothing}  # result hash (32 bytes or nothing)
 
@@ -201,7 +201,7 @@ function ImplicationsContext(
             self_copy,  # independent copy of service account
             privileged_state,  # can share - not modified during accumulate
             accounts,  # can share - dict reference
-            DeferredTransfer[],  # empty transfers
+            Any[],  # empty transfers
             Set{Tuple{ServiceId, Blob}}(),  # empty provisions
             nothing,
             next_free_id,

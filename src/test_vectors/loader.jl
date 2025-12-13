@@ -228,14 +228,15 @@ function load_state_from_json(json_data)::State
 
     # Parse ready_queue
     # Ready queue is a ring buffer of work reports with their dependencies
-    # Format: array of [report_entry] or [] for empty slots
+    # Format: array of [report_entry, ...] or [] for empty slots
+    # Each slot can contain MULTIPLE report entries
     # Where report_entry = {report: {...}, dependencies: [hashes]}
     ready_queue = Vector{Any}()
     if haskey(json_data, :ready_queue)
         for item in json_data[:ready_queue]
             if length(item) > 0
-                # Non-empty slot: has report and dependencies
-                push!(ready_queue, item[1])  # Store the report entry
+                # Non-empty slot: store ALL items (can be multiple per slot)
+                push!(ready_queue, collect(item))  # Convert to Vector with all items
             else
                 # Empty slot
                 push!(ready_queue, nothing)
