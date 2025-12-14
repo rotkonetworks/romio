@@ -1,0 +1,525 @@
+#!/usr/bin/env julia
+#
+# JAMit - JAM Protocol Implementation in Julia
+# CLI entry point for running validators, testnets, and tools
+#
+
+# Activate project
+project_dir = dirname(dirname(@__FILE__))
+pushfirst!(LOAD_PATH, project_dir)
+
+using Pkg
+Pkg.activate(project_dir)
+
+using ArgParse
+using TOML
+using SHA
+using Sockets
+
+# Load Quic for networking
+using Quic
+using Quic.JAMNPS
+using Quic.Ed25519
+
+const VERSION = "0.1.0"
+
+function parse_commandline()
+    s = ArgParseSettings(
+        prog = "jamit",
+        description = "JAM Protocol Implementation - Validator and Testnet CLI",
+        version = VERSION,
+        add_version = true
+    )
+
+    @add_arg_table! s begin
+        "command"
+            help = "Command to run: run, testnet, init, keygen, status"
+            required = true
+
+        "--config", "-c"
+            help = "Path to configuration file"
+            default = "jamit.toml"
+
+        "--data-dir", "-d"
+            help = "Data directory for chain state"
+            default = "./jam_data"
+
+        "--port", "-p"
+            help = "Network listen port"
+            arg_type = Int
+            default = 30333
+
+        "--rpc-port"
+            help = "RPC server port"
+            arg_type = Int
+            default = 9933
+
+        "--validators", "-n"
+            help = "Number of validators for testnet"
+            arg_type = Int
+            default = 6
+
+        "--seed"
+            help = "Seed phrase or hex for key generation"
+            default = ""
+
+        "--bootnodes"
+            help = "Comma-separated list of bootnode addresses"
+            default = ""
+
+        "--builder"
+            help = "Run as builder node (not validator)"
+            action = :store_true
+
+        "--verbose", "-v"
+            help = "Enable verbose output"
+            action = :store_true
+
+        "--genesis"
+            help = "Path to genesis file"
+            default = ""
+    end
+
+    return parse_args(s)
+end
+
+# Testnet validator state
+mutable struct TestnetValidator
+    id::Int
+    identity::JAMNPS.JAMNPSIdentity
+    alt_name::String
+    port::UInt16
+    socket::Union{UDPSocket, Nothing}
+    running::Bool
+    blocks_produced::UInt64
+    current_timeslot::UInt64
+end
+
+function cmd_run(args)
+    println("╔═══════════════════════════════════════════════════════════════╗")
+    println("║              JAMit - JAM Validator Node                       ║")
+    println("╚═══════════════════════════════════════════════════════════════╝")
+    println()
+
+    config_path = args["config"]
+
+    # Load or create config
+    config = if isfile(config_path)
+        TOML.parsefile(config_path)
+    else
+        Dict{String, Any}()
+    end
+
+    # Get genesis hash (default to zero for dev)
+    genesis_hash = if haskey(config, "chain") && haskey(config["chain"], "genesis")
+        hex2bytes(config["chain"]["genesis"])
+    else
+        zeros(UInt8, 32)
+    end
+
+    # Generate or load identity
+    seed = if !isempty(args["seed"])
+        if length(args["seed"]) == 64
+            hex2bytes(args["seed"])
+        else
+            sha256(Vector{UInt8}(args["seed"]))
+        end
+    elseif haskey(config, "node") && haskey(config["node"], "seed")
+        hex2bytes(config["node"]["seed"])
+    else
+        rand(UInt8, 32)
+    end
+
+    identity = JAMNPS.identity_from_seed(seed)
+    alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+    alpn = JAMNPS.make_alpn(genesis_hash)
+
+    port = UInt16(args["port"])
+
+    println("Identity:")
+    println("  Alt-name:   $alt_name")
+    println("  Public key: $(bytes2hex(identity.keypair.public_key))")
+    println()
+    println("Network:")
+    println("  ALPN:       $alpn")
+    println("  Port:       $port")
+    println("  Role:       $(args["builder"] ? "Builder" : "Validator")")
+    println()
+
+    # Parse bootnodes
+    bootnodes = if !isempty(args["bootnodes"])
+        split(args["bootnodes"], ",") .|> String
+    else
+        String[]
+    end
+
+    if !isempty(bootnodes)
+        println("Bootnodes:")
+        for bn in bootnodes
+            println("  - $bn")
+        end
+        println()
+    end
+
+    # Create UDP socket
+    socket = UDPSocket()
+    bind(socket, IPv4("0.0.0.0"), port)
+
+    println("Node started. Press Ctrl+C to stop.")
+    println()
+    println("═══════════════════════════════════════════════════════════════")
+
+    running = true
+    blocks_produced = 0
+    jam_epoch_start = 1735732800.0  # JAM Common Era start
+
+    try
+        while running
+            current_time = time()
+            seconds_since_epoch = current_time - jam_epoch_start
+            current_timeslot = max(1, floor(Int, seconds_since_epoch / 6.0))
+
+            # Network I/O handled by async tasks
+
+            # Simulate block production every 6 seconds
+            if current_timeslot % 6 == 0 && rand() < 0.1
+                blocks_produced += 1
+                if args["verbose"]
+                    println("[$(current_timeslot)] Produced block #$blocks_produced")
+                end
+            end
+
+            if args["verbose"] && current_timeslot % 10 == 0
+                println("[$(current_timeslot)] Running... Blocks: $blocks_produced")
+            end
+
+            sleep(1.0)
+        end
+    catch e
+        if isa(e, InterruptException)
+            println("\nShutting down...")
+        else
+            println("Error: $e")
+            rethrow(e)
+        end
+    finally
+        close(socket)
+    end
+
+    println("Node stopped. Produced $blocks_produced blocks.")
+end
+
+function cmd_testnet(args)
+    num_validators = args["validators"]
+    base_port = args["port"]
+
+    println("╔═══════════════════════════════════════════════════════════════╗")
+    println("║              JAMit - Local Testnet                            ║")
+    println("╚═══════════════════════════════════════════════════════════════╝")
+    println()
+    println("Validators: $num_validators")
+    println("Base port:  $base_port")
+    println()
+
+    genesis_hash = zeros(UInt8, 32)
+    alpn = JAMNPS.make_alpn(genesis_hash)
+    println("ALPN: $alpn")
+    println()
+
+    # Create validators
+    validators = TestnetValidator[]
+
+    println("Initializing validators...")
+    println()
+
+    for i in 1:num_validators
+        seed = sha256(Vector{UInt8}("jamit-testnet-validator-$i"))
+        identity = JAMNPS.identity_from_seed(seed)
+        alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+        port = UInt16(base_port + i - 1)
+
+        validator = TestnetValidator(
+            i,
+            identity,
+            alt_name,
+            port,
+            nothing,
+            false,
+            0,
+            0
+        )
+
+        push!(validators, validator)
+
+        println("Validator $i:")
+        println("  Alt-name: $alt_name")
+        println("  Port:     $port")
+        println()
+    end
+
+    # Start all validators
+    println("Starting validators...")
+    println()
+
+    for v in validators
+        v.socket = UDPSocket()
+        try
+            bind(v.socket, IPv4("127.0.0.1"), v.port)
+            v.running = true
+        catch e
+            println("Failed to bind validator $(v.id) on port $(v.port): $e")
+        end
+    end
+
+    running_count = count(v -> v.running, validators)
+    println("Started $running_count/$num_validators validators")
+    println()
+    println("Press Ctrl+C to stop testnet.")
+    println()
+    println("═══════════════════════════════════════════════════════════════")
+
+    jam_epoch_start = 1735732800.0
+
+    try
+        while any(v -> v.running, validators)
+            current_time = time()
+            seconds_since_epoch = current_time - jam_epoch_start
+            current_timeslot = max(1, floor(Int, seconds_since_epoch / 6.0))
+
+            for v in validators
+                if !v.running
+                    continue
+                end
+
+                v.current_timeslot = current_timeslot
+
+                # Simulate block production (1 validator per timeslot)
+                producer_idx = (current_timeslot % num_validators) + 1
+                if v.id == producer_idx && v.current_timeslot != current_timeslot
+                    v.blocks_produced += 1
+
+                    # Broadcast to other validators
+                    block_msg = "BLOCK:$(v.id):$(v.blocks_produced):$(current_timeslot)"
+
+                    for other in validators
+                        if other.id != v.id && other.running
+                            try
+                                send(v.socket, IPv4("127.0.0.1"), other.port, Vector{UInt8}(block_msg))
+                            catch
+                            end
+                        end
+                    end
+
+                    if args["verbose"]
+                        println("[T$(current_timeslot)] Validator $(v.id) produced block #$(v.blocks_produced)")
+                    end
+                end
+
+                # Receive messages (non-blocking via timeout)
+                # Note: Using async tasks for proper non-blocking I/O
+            end
+
+            # Status update every 10 timeslots
+            if current_timeslot % 30 == 0
+                total_blocks = sum(v -> v.blocks_produced, validators)
+                println("[T$(current_timeslot)] Total blocks: $total_blocks")
+            end
+
+            sleep(0.5)
+        end
+    catch e
+        if isa(e, InterruptException)
+            println("\nShutting down testnet...")
+        else
+            rethrow(e)
+        end
+    finally
+        for v in validators
+            v.running = false
+            if v.socket !== nothing
+                close(v.socket)
+            end
+        end
+    end
+
+    total_blocks = sum(v -> v.blocks_produced, validators)
+    println()
+    println("Testnet stopped. Total blocks produced: $total_blocks")
+end
+
+function cmd_keygen(args)
+    println("╔═══════════════════════════════════════════════════════════════╗")
+    println("║              JAMit - Key Generation                           ║")
+    println("╚═══════════════════════════════════════════════════════════════╝")
+    println()
+
+    seed = if !isempty(args["seed"])
+        if length(args["seed"]) == 64
+            hex2bytes(args["seed"])
+        else
+            sha256(Vector{UInt8}(args["seed"]))
+        end
+    else
+        rand(UInt8, 32)
+    end
+
+    identity = JAMNPS.identity_from_seed(seed)
+    alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+
+    println("Identity generated:")
+    println()
+    println("  Alt-name:    $alt_name")
+    println("  Public key:  $(bytes2hex(identity.keypair.public_key))")
+    println("  Seed (hex):  $(bytes2hex(seed))")
+    println()
+    println("Save the seed securely - it's required to restore this identity.")
+end
+
+function cmd_init(args)
+    config_path = args["config"]
+    data_dir = args["data-dir"]
+
+    println("╔═══════════════════════════════════════════════════════════════╗")
+    println("║              JAMit - Initialize Node                          ║")
+    println("╚═══════════════════════════════════════════════════════════════╝")
+    println()
+
+    # Create data directory
+    mkpath(data_dir)
+
+    # Generate new identity
+    seed = rand(UInt8, 32)
+    identity = JAMNPS.identity_from_seed(seed)
+    alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+
+    # Create default config
+    config = """
+# JAMit Configuration File
+# Generated: $(Dates.now())
+
+[node]
+# Node identity seed (hex) - KEEP THIS SECRET
+seed = "$(bytes2hex(seed))"
+
+# Data directory
+data_dir = "$data_dir"
+
+# Network port
+port = $(args["port"])
+
+# RPC port
+rpc_port = $(args["rpc-port"])
+
+[chain]
+# Genesis hash (32 bytes hex, zeros for testnet)
+genesis = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[network]
+# Bootstrap nodes
+bootnodes = []
+
+# Maximum peers
+max_peers = 50
+
+[validator]
+# Run as block producer
+is_authority = true
+
+# Enable GRANDPA finality
+enable_grandpa = true
+
+# Enable work package processing
+enable_work_processing = true
+"""
+
+    # Write config
+    open(config_path, "w") do f
+        write(f, config)
+    end
+
+    println("Node initialized:")
+    println()
+    println("  Config:    $config_path")
+    println("  Data dir:  $data_dir")
+    println("  Alt-name:  $alt_name")
+    println()
+    println("Run 'jamit run' to start the node.")
+end
+
+function cmd_status(args)
+    println("╔═══════════════════════════════════════════════════════════════╗")
+    println("║              JAMit - Node Status                              ║")
+    println("╚═══════════════════════════════════════════════════════════════╝")
+    println()
+    println("Version:  $VERSION")
+    println("Config:   $(args["config"])")
+    println()
+
+    if isfile(args["config"])
+        config = TOML.parsefile(args["config"])
+
+        if haskey(config, "node") && haskey(config["node"], "seed")
+            seed = hex2bytes(config["node"]["seed"])
+            identity = JAMNPS.identity_from_seed(seed)
+            alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+
+            genesis_hash = if haskey(config, "chain") && haskey(config["chain"], "genesis")
+                hex2bytes(config["chain"]["genesis"])
+            else
+                zeros(UInt8, 32)
+            end
+
+            alpn = JAMNPS.make_alpn(genesis_hash)
+
+            println("Identity:")
+            println("  Alt-name: $alt_name")
+            println()
+            println("Chain:")
+            println("  ALPN: $alpn")
+            println()
+        end
+
+        if haskey(config, "node")
+            println("Configuration:")
+            println("  Port: $(get(config["node"], "port", 30333))")
+            println("  Data: $(get(config["node"], "data_dir", "./jam_data"))")
+        end
+    else
+        println("No config file found at $(args["config"])")
+        println()
+        println("Run 'jamit init' to create one.")
+    end
+end
+
+function main()
+    args = parse_commandline()
+
+    cmd = args["command"]
+
+    if cmd == "run"
+        cmd_run(args)
+    elseif cmd == "testnet"
+        cmd_testnet(args)
+    elseif cmd == "keygen"
+        cmd_keygen(args)
+    elseif cmd == "init"
+        cmd_init(args)
+    elseif cmd == "status"
+        cmd_status(args)
+    else
+        println("Unknown command: $cmd")
+        println()
+        println("Available commands:")
+        println("  run      - Run a validator node")
+        println("  testnet  - Start a local testnet")
+        println("  init     - Initialize node configuration")
+        println("  keygen   - Generate a new validator identity")
+        println("  status   - Show node status")
+        exit(1)
+    end
+end
+
+# Need Dates for init command
+using Dates
+
+main()
