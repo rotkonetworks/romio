@@ -59,7 +59,7 @@ jobs:
             ${{ runner.os }}-x64-julia-
 
       - name: Setup Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build Bandersnatch FFI
         run: |
