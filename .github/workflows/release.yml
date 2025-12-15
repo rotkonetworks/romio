@@ -16,24 +16,27 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: linux-x86_64
-            julia_arch: x64
-          - os: ubuntu-24.04-arm
-            target: linux-aarch64
-            julia_arch: aarch64
-          - os: macos-15-large
-            target: macos-x86_64
-            julia_arch: x64
-          - os: macos-14
-            target: macos-aarch64
-            julia_arch: aarch64
+    # TODO: Add back other platforms after linux-x86_64 works
+    # strategy:
+    #   fail-fast: false
+    #   matrix:
+    #     include:
+    #       - os: ubuntu-latest
+    #         target: linux-x86_64
+    #         julia_arch: x64
+    #       - os: ubuntu-24.04-arm
+    #         target: linux-aarch64
+    #         julia_arch: aarch64
+    #       - os: macos-15-large
+    #         target: macos-x86_64
+    #         julia_arch: x64
+    #       - os: macos-14
+    #         target: macos-aarch64
+    #         julia_arch: aarch64
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    env:
+      TARGET: linux-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +45,7 @@ jobs:
         uses: julia-actions/setup-julia@v2
         with:
           version: '1.12'
-          arch: ${{ matrix.julia_arch }}
+          arch: x64
 
       - name: Cache Julia packages
         uses: actions/cache@v4
@@ -51,9 +54,9 @@ jobs:
             ~/.julia/artifacts
             ~/.julia/packages
             ~/.julia/registries
-          key: ${{ runner.os }}-${{ matrix.julia_arch }}-julia-${{ hashFiles('**/Manifest.toml') }}
+          key: ${{ runner.os }}-x64-julia-${{ hashFiles('**/Manifest.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.julia_arch }}-julia-
+            ${{ runner.os }}-x64-julia-
 
       - name: Install dependencies
         run: |
@@ -71,13 +74,13 @@ jobs:
         run: |
           # The binary is at build/jamit/bin/jamit
           chmod +x build/jamit/bin/jamit
-          cp build/jamit/bin/jamit jamit-${{ matrix.target }}
+          cp build/jamit/bin/jamit jamit-${{ env.TARGET }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jamit-${{ matrix.target }}
-          path: jamit-${{ matrix.target }}
+          name: jamit-${{ env.TARGET }}
+          path: jamit-${{ env.TARGET }}
 
   release:
     needs: build
