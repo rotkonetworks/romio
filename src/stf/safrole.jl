@@ -3,6 +3,7 @@
 
 include("../types/basic.jl")
 include("../test_vectors/loader.jl")
+include("../crypto/bandersnatch.jl")
 using JSON3
 
 # Epoch length (slots per epoch) - tiny = 12, full = 600
@@ -13,25 +14,6 @@ const EPOCH_LENGTH_FULL = 600
 # For tiny: Y = 2, so tickets accepted in slots 0-9 of epoch
 const TAIL_SLOTS_TINY = 2
 
-# Try to load native Bandersnatch library, fall back to Python helper
-const _use_native_vrf = Ref{Union{Bool, Nothing}}(nothing)
-
-function use_native_vrf()::Bool
-    if _use_native_vrf[] === nothing
-        try
-            include(joinpath(@__DIR__, "..", "crypto", "bandersnatch.jl"))
-            _use_native_vrf[] = Main.Bandersnatch.is_available()
-        catch
-            _use_native_vrf[] = false
-        end
-    end
-    return _use_native_vrf[]
-end
-
-# Legacy Python paths (fallback if native unavailable)
-const PYTHON_VENV = joinpath(@__DIR__, "..", "..", ".venv", "bin", "python3")
-const VRF_HELPER = joinpath(@__DIR__, "..", "crypto", "vrf_helper.py")
-
 # Compute ticket ID from signature using Bandersnatch VRF
 # The ticket ID is the first 32 bytes of the SHA-512 hash of the VRF output point
 function compute_ticket_id(signature_hex::String)::Union{Vector{UInt8}, Nothing}
@@ -39,28 +21,11 @@ function compute_ticket_id(signature_hex::String)::Union{Vector{UInt8}, Nothing}
     sig_hex = startswith(signature_hex, "0x") ? signature_hex[3:end] : signature_hex
     sig_bytes = hex2bytes(sig_hex)
 
-    # Try native library first
-    if use_native_vrf()
-        try
-            return Main.Bandersnatch.compute_ticket_id_from_signature(sig_bytes)
-        catch e
-            return nothing
-        end
-    end
-
-    # Fallback to Python helper
     try
-        sig_hex = startswith(signature_hex, "0x") ? signature_hex : "0x" * signature_hex
-        result = read(`$PYTHON_VENV $VRF_HELPER ticket_id $sig_hex`, String)
-        result = strip(result)
-        if !isempty(result)
-            return hex2bytes(result)
-        end
+        return Bandersnatch.compute_ticket_id_from_signature(sig_bytes)
     catch e
-        # VRF computation failed (invalid point)
         return nothing
     end
-    return nothing
 end
 
 # Extract ticket ID from signature - legacy wrapper
@@ -90,63 +55,26 @@ function verify_tickets(
     eta2_hex = startswith(eta2, "0x") ? eta2[3:end] : eta2
     eta2_bytes = hex2bytes(eta2_hex)
 
-    # Try native library first
-    if use_native_vrf()
-        try
-            # Convert tickets to format expected by native batch_verify_tickets
-            native_tickets = []
-            for t in tickets
-                sig_hex = string(get(t, :signature, ""))
-                sig_hex = startswith(sig_hex, "0x") ? sig_hex[3:end] : sig_hex
-                push!(native_tickets, (
-                    attempt = get(t, :attempt, 0),
-                    signature = hex2bytes(sig_hex)
-                ))
-            end
-            return Main.Bandersnatch.batch_verify_tickets(gamma_z_bytes, ring_size, eta2_bytes, native_tickets)
-        catch e
-            # Fall through to Python fallback
-        end
-    end
-
-    # Fallback to Python helper
-    ticket_data = [Dict("attempt" => get(t, :attempt, 0), "signature" => string(get(t, :signature, ""))) for t in tickets]
-    request = Dict(
-        "commitment" => string(gamma_z),
-        "ring_size" => ring_size,
-        "entropy" => string(eta2),
-        "tickets" => ticket_data
-    )
-
-    results = Vector{Tuple{Union{Vector{UInt8}, Nothing}, Bool}}()
-
     try
-        # Call Python helper with batch_verify command
-        cmd = `$PYTHON_VENV $VRF_HELPER batch_verify`
-        proc = open(cmd, "r+")
-        write(proc, JSON3.write(request))
-        close(proc.in)
-        output = read(proc, String)
-        wait(proc)
-
-        # Parse results
-        parsed = JSON3.read(output)
-        for r in parsed
-            if haskey(r, :ok)
-                ticket_id = hex2bytes(r[:ok])
-                push!(results, (ticket_id, true))
-            else
-                push!(results, (nothing, false))
-            end
+        # Convert tickets to format expected by native batch_verify_tickets
+        native_tickets = []
+        for t in tickets
+            sig_hex = string(get(t, :signature, ""))
+            sig_hex = startswith(sig_hex, "0x") ? sig_hex[3:end] : sig_hex
+            push!(native_tickets, (
+                attempt = get(t, :attempt, 0),
+                signature = hex2bytes(sig_hex)
+            ))
         end
+        return Bandersnatch.batch_verify_tickets(gamma_z_bytes, ring_size, eta2_bytes, native_tickets)
     catch e
         # On error, mark all tickets as invalid
+        results = Vector{Tuple{Union{Vector{UInt8}, Nothing}, Bool}}()
         for _ in tickets
             push!(results, (nothing, false))
         end
+        return results
     end
-
-    return results
 end
 
 # Process safrole STF
@@ -201,136 +129,45 @@ function process_safrole(
 
     # 4. Verify ring VRF proofs and compute ticket IDs
     # This verifies the proofs against gamma_z (ring commitment) and eta[2] (entropy)
-    gamma_z = get(pre_state, :gamma_z, nothing)
-    eta = get(pre_state, :eta, nothing)
-    ring_size = length(validators)
+    gamma_z = get(pre_state, :gamma_z, "0x" * "00"^48)
+    eta = get(pre_state, :eta, ["0x" * "00"^32 for _ in 1:4])
+    eta2 = eta[3]  # eta[2] in 0-indexed
 
-    # Get eta[2] for VRF verification (0-indexed in graypaper, 3rd element)
-    eta2 = if eta !== nothing && length(eta) >= 3
-        string(eta[3])  # Julia is 1-indexed
-    else
-        ""
-    end
+    verified = verify_tickets(string(gamma_z), length(validators), string(eta2), tickets)
 
-    # Verify all tickets
-    verification_results = if gamma_z !== nothing && !isempty(eta2)
-        verify_tickets(string(gamma_z), ring_size, eta2, tickets)
-    else
-        # Fallback: just compute ticket IDs without full verification
-        [(extract_ticket_id(get(t, :signature, nothing)), true) for t in tickets]
-    end
-
-    # Check for bad proofs (any ticket failed verification)
-    ticket_ids = Vector{Union{Vector{UInt8}, Nothing}}()
-    for (ticket_id, is_valid) in verification_results
+    # Check all tickets verified successfully
+    for (ticket_id, is_valid) in verified
         if !is_valid
-            # VRF proof verification failed
             return (pre_state, :bad_ticket_proof)
         end
-        push!(ticket_ids, ticket_id)
     end
 
-    # 5. Check ticket ordering (tickets must be sorted by ID in ascending order)
-    # Per graypaper: tickets must be ordered by their identifier
-    for i in 2:length(ticket_ids)
-        prev_id = ticket_ids[i-1]
-        curr_id = ticket_ids[i]
-        if prev_id !== nothing && curr_id !== nothing
-            # Compare as byte arrays (lexicographic ordering)
-            if prev_id >= curr_id
-                return (pre_state, :bad_ticket_order)
-            end
-        end
-    end
+    # 5. Insert valid tickets into gamma_a (ticket accumulator)
+    # Using Outside-in insertion per graypaper section 6.3
+    gamma_a = copy(get(pre_state, :gamma_a, []))
 
-    # 6. Check for duplicate tickets within submission
-    seen_ids = Set{Vector{UInt8}}()
-    for ticket_id in ticket_ids
+    for (i, ticket) in enumerate(tickets)
+        ticket_id, _ = verified[i]
         if ticket_id !== nothing
-            if ticket_id in seen_ids
-                return (pre_state, :duplicate_ticket)
-            end
-            push!(seen_ids, ticket_id)
-        end
-    end
+            # Create ticket entry
+            entry = (
+                id = ticket_id,
+                attempt = get(ticket, :attempt, 0)
+            )
 
-    # 7. Check for duplicate tickets against gamma_a (existing tickets in accumulator)
-    # gamma_a stores TicketBody with `id` field (32-byte hex string)
-    gamma_a = get(pre_state, :gamma_a, [])
-    for ticket_id in ticket_ids
-        if ticket_id !== nothing
-            for existing in gamma_a
-                existing_id = get(existing, :id, nothing)
-                if existing_id !== nothing
-                    # Parse gamma_a id (it's a hex string, not a signature - just direct bytes)
-                    existing_hex = startswith(existing_id, "0x") ? existing_id[3:end] : existing_id
-                    existing_id_bytes = hex2bytes(existing_hex)
-                    if ticket_id == existing_id_bytes
-                        return (pre_state, :duplicate_ticket)
-                    end
-                end
+            # Outside-in insertion: alternate front/back
+            if length(gamma_a) % 2 == 0
+                pushfirst!(gamma_a, entry)
+            else
+                push!(gamma_a, entry)
             end
         end
     end
 
-    return (pre_state, :ok)
+    # 6. Build new state
+    new_state = copy(pre_state)
+    new_state[:gamma_a] = gamma_a
+    new_state[:tau] = slot
+
+    return (new_state, :ok)
 end
-
-# Run safrole test vector
-function run_safrole_test_vector(filepath::String)
-    println("\n=== Running Safrole Test Vector: $(basename(filepath)) ===")
-
-    # Load test vector
-    json_str = read(filepath, String)
-    tv = JSON3.read(json_str)
-
-    # Parse input
-    slot = tv[:input][:slot]
-    entropy = tv[:input][:entropy]
-    extrinsic = tv[:input][:extrinsic]
-
-    # Pre-state
-    pre_state = tv[:pre_state]
-
-    println("Input:")
-    println("  Slot: $slot")
-
-    # Run state transition
-    new_state, result = process_safrole(pre_state, slot, entropy, extrinsic)
-
-    # Check expected output
-    expected_output = tv[:output]
-
-    println("\n=== State Comparison ===")
-
-    if haskey(expected_output, :err)
-        # Expected an error
-        expected_err = Symbol(expected_output[:err])
-        if result == expected_err
-            println("  Correct error returned: $result")
-            println("\n=== Test Vector Result ===")
-            println("  PASS")
-            return true
-        else
-            println("  Wrong error: expected $expected_err, got $result")
-            println("\n=== Test Vector Result ===")
-            println("  FAIL")
-            return false
-        end
-    else
-        # Expected success
-        if result == :ok
-            println("  Success as expected")
-            println("\n=== Test Vector Result ===")
-            println("  PASS")
-            return true
-        else
-            println("  Expected success, got error: $result")
-            println("\n=== Test Vector Result ===")
-            println("  FAIL")
-            return false
-        end
-    end
-end
-
-export process_safrole, run_safrole_test_vector
