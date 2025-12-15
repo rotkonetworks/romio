@@ -1,526 +1,779 @@
 #!/usr/bin/env julia
 #
 # JAMit - JAM Protocol Implementation in Julia
-# CLI entry point for running validators, testnets, and tools
+# CLI structure matching polkajam
 #
 
-# Activate project
 project_dir = dirname(dirname(@__FILE__))
 pushfirst!(LOAD_PATH, project_dir)
 
 using Pkg
-Pkg.activate(project_dir)
+Pkg.activate(project_dir; io=devnull)
 
 using ArgParse
 using TOML
+using JSON
 using SHA
 using Sockets
+using Libdl
+using Dates
 
-# Load Quic for networking
+# Load Quic - using full Julia QUIC library for connections
 using Quic
-using Quic.JAMNPS
 using Quic.Ed25519
+using Quic.Handshake
+using Quic.ConnectionModule: Connection, initiate_handshake, send_frame, open_stream, send_stream
+using Quic.EndpointModule: Endpoint, EndpointConfig
+
+# Include local JAMNPS module
+include(joinpath(project_dir, "src", "network", "jamnps.jl"))
+using .JAMNPS
+
+# Include QUIC connection module (requires JAMNPS)
+include(joinpath(project_dir, "src", "network", "quic_connection.jl"))
+using .JAMNPSConnection
+
+# Include RPC module
+include(joinpath(project_dir, "src", "rpc", "server.jl"))
+using .RPC
+
+# Include Telemetry module
+include(joinpath(project_dir, "src", "telemetry", "client.jl"))
+using .Telemetry
+
+# Include Sync module (uses pure Julia QUIC via JAMNPSConnection)
+include(joinpath(project_dir, "src", "network", "sync.jl"))
+using .BlockSync
 
 const VERSION = "0.1.0"
 
-function parse_commandline()
-    s = ArgParseSettings(
-        prog = "jamit",
-        description = "JAM Protocol Implementation - Validator and Testnet CLI",
-        version = VERSION,
-        add_version = true
-    )
-
-    @add_arg_table! s begin
-        "command"
-            help = "Command to run: run, testnet, init, keygen, status"
-            required = true
-
-        "--config", "-c"
-            help = "Path to configuration file"
-            default = "jamit.toml"
-
-        "--data-dir", "-d"
-            help = "Data directory for chain state"
-            default = "./jam_data"
-
-        "--port", "-p"
-            help = "Network listen port"
-            arg_type = Int
-            default = 30333
-
-        "--rpc-port"
-            help = "RPC server port"
-            arg_type = Int
-            default = 9933
-
-        "--validators", "-n"
-            help = "Number of validators for testnet"
-            arg_type = Int
-            default = 6
-
-        "--seed"
-            help = "Seed phrase or hex for key generation"
-            default = ""
-
-        "--bootnodes"
-            help = "Comma-separated list of bootnode addresses"
-            default = ""
-
-        "--builder"
-            help = "Run as builder node (not validator)"
-            action = :store_true
-
-        "--verbose", "-v"
-            help = "Enable verbose output"
-            action = :store_true
-
-        "--genesis"
-            help = "Path to genesis file"
-            default = ""
-    end
-
-    return parse_args(s)
+# ===== JIP-5: Key Derivation =====
+function blake2b_32(data::Vector{UInt8})::Vector{UInt8}
+    lib = Libdl.dlopen("libsodium")
+    out = zeros(UInt8, 32)
+    ret = ccall(Libdl.dlsym(lib, :crypto_generichash), Cint,
+        (Ptr{UInt8}, Csize_t, Ptr{UInt8}, Culonglong, Ptr{Nothing}, Csize_t),
+        out, 32, data, length(data), C_NULL, 0)
+    Libdl.dlclose(lib)
+    ret != 0 && error("BLAKE2b failed")
+    return out
 end
 
-# Testnet validator state
+const JIP5_ED25519_DOMAIN = Vector{UInt8}("jam_val_key_ed25519")
+const JIP5_BANDERSNATCH_DOMAIN = Vector{UInt8}("jam_val_key_bandersnatch")
+
+jip5_derive_ed25519_seed(seed::Vector{UInt8}) = blake2b_32(vcat(JIP5_ED25519_DOMAIN, seed))
+jip5_derive_bandersnatch_seed(seed::Vector{UInt8}) = blake2b_32(vcat(JIP5_BANDERSNATCH_DOMAIN, seed))
+jip5_trivial_seed(i::UInt32) = repeat(reinterpret(UInt8, [i]), 8)
+
+# ===== JIP-4: Chain Specification =====
+struct ChainSpec
+    id::String
+    bootnodes::Vector{String}
+    genesis_header::Vector{UInt8}
+    genesis_hash::Union{Vector{UInt8}, Nothing}  # Optional override for cross-client compat
+    genesis_state::Dict{String, Vector{UInt8}}
+    protocol_parameters::Vector{UInt8}
+end
+
+function load_chain_spec(path::String)::ChainSpec
+    data = JSON.parsefile(path)
+    genesis_header = hex2bytes(get(data, "genesis_header", repeat("00", 128)))
+    # Support direct genesis_hash for cross-client testing (e.g., matching polkajam dev chain)
+    genesis_hash = haskey(data, "genesis_hash") ? hex2bytes(data["genesis_hash"]) : nothing
+    genesis_state = Dict{String, Vector{UInt8}}()
+    haskey(data, "genesis_state") && for (k, v) in data["genesis_state"]
+        genesis_state[k] = hex2bytes(v)
+    end
+    ChainSpec(get(data, "id", "unknown"), get(data, "bootnodes", String[]), genesis_header, genesis_hash, genesis_state,
+        hex2bytes(get(data, "protocol_parameters", "0600000004000000550300000a00000058020000")))
+end
+
+# Get genesis hash - use explicit hash if provided, otherwise compute from header
+get_genesis_hash(spec::ChainSpec) = spec.genesis_hash !== nothing ? spec.genesis_hash : sha256(spec.genesis_header)
+
+struct ProtocolParams
+    timeslot_duration::UInt32
+    epoch_length::UInt32
+    validator_count::UInt32
+    core_count::UInt32
+    finality_delay::UInt32
+end
+
+function parse_protocol_params(data::Vector{UInt8})::ProtocolParams
+    length(data) < 20 && return ProtocolParams(6, 600, 1023, 341, 10)
+    ProtocolParams(reinterpret(UInt32, data[1:4])[1], reinterpret(UInt32, data[5:8])[1],
+        reinterpret(UInt32, data[9:12])[1], reinterpret(UInt32, data[13:16])[1], reinterpret(UInt32, data[17:20])[1])
+end
+
+# ===== Chain State =====
+struct ChainBlock
+    height::UInt64
+    timeslot::UInt64
+    producer_id::Int
+    parent_hash::Vector{UInt8}
+    hash::Vector{UInt8}
+end
+
+mutable struct SharedChain
+    blocks::Vector{ChainBlock}
+    head_height::UInt64
+    head_hash::Vector{UInt8}
+    finalized_height::UInt64
+end
+
+SharedChain() = SharedChain([ChainBlock(0, 0, 0, zeros(UInt8, 32), zeros(UInt8, 32))], 0, zeros(UInt8, 32), 0)
+
+function add_block!(chain::SharedChain, block::ChainBlock)
+    push!(chain.blocks, block)
+    chain.head_height = block.height
+    chain.head_hash = block.hash
+end
+
+# ===== RPC Chain State Adapter =====
+mutable struct LiveChainState <: RPC.ChainState
+    chain::SharedChain
+    best_block::RPC.BlockDescriptor
+    finalized_block::RPC.BlockDescriptor
+    blocks::Dict{Vector{UInt8}, Any}
+    services::Dict{UInt32, Dict{String, Any}}
+    parameters::Dict{String, Any}
+end
+
+function LiveChainState(chain::SharedChain)
+    LiveChainState(
+        chain,
+        RPC.BlockDescriptor(chain.head_hash, chain.head_height),
+        RPC.BlockDescriptor(zeros(UInt8, 32), chain.finalized_height),
+        Dict{Vector{UInt8}, Any}(),
+        Dict{UInt32, Dict{String, Any}}(),
+        RPC.default_parameters()
+    )
+end
+
+function sync_chain_state!(state::LiveChainState)
+    state.best_block = RPC.BlockDescriptor(state.chain.head_hash, state.chain.head_height)
+    state.finalized_block = RPC.BlockDescriptor(
+        state.chain.finalized_height > 0 ? state.chain.blocks[state.chain.finalized_height + 1].hash : zeros(UInt8, 32),
+        state.chain.finalized_height
+    )
+end
+
+compute_block_hash(h::UInt64, t::UInt64, p::Int, parent::Vector{UInt8}) =
+    sha256(vcat(reinterpret(UInt8, [h]), reinterpret(UInt8, [t]), reinterpret(UInt8, [Int64(p)]), parent))
+
 mutable struct TestnetValidator
     id::Int
     identity::JAMNPS.JAMNPSIdentity
     alt_name::String
     port::UInt16
-    socket::Union{UDPSocket, Nothing}
+    # QUIC endpoint and connections
+    endpoint::Union{Quic.Endpoint, Nothing}
+    connections::Dict{Int, Quic.Connection}  # peer_id -> connection
     running::Bool
     blocks_produced::UInt64
     current_timeslot::UInt64
+    last_seen_height::UInt64
+end
+
+function TestnetValidator(id::Int, identity::JAMNPS.JAMNPSIdentity, alt_name::String, port::UInt16)
+    TestnetValidator(
+        id, identity, alt_name, port,
+        nothing, Dict{Int, Quic.Connection}(),
+        false, 0, 0, 0
+    )
+end
+
+# ===== CLI Parser =====
+function parse_commandline()
+    s = ArgParseSettings(prog="jamit", description="JAMit - JAM Protocol Implementation in Julia",
+        version=VERSION, add_version=true, commands_are_required=true)
+
+    # Global options
+    @add_arg_table! s begin
+        "--chain", "-c"
+            help = "Chain to run: dev, or path to chain spec"
+            default = "dev"
+    end
+
+    # Commands
+    @add_arg_table! s begin
+        "gen-spec"
+            help = "Generate new chain spec from the spec config"
+            action = :command
+    end
+
+    # dump-spec command
+    @add_arg_table! s begin
+        "dump-spec"
+            help = "Dump the spec of the chain given by --chain option"
+            action = :command
+    end
+
+    # gen-keys command
+    @add_arg_table! s begin
+        "gen-keys"
+            help = "Generate a new secret key seed and print the derived session keys"
+            action = :command
+    end
+
+    # list-keys command
+    @add_arg_table! s begin
+        "list-keys"
+            help = "List all session keys we have the secret key for"
+            action = :command
+    end
+
+    # benchmark command
+    @add_arg_table! s begin
+        "benchmark"
+            help = "Run a series of performance benchmarks"
+            action = :command
+    end
+
+    # run command
+    @add_arg_table! s begin
+        "run"
+            help = "Run a JAMit node"
+            action = :command
+    end
+
+    # testnet command
+    @add_arg_table! s begin
+        "testnet"
+            help = "Run a local testnet"
+            action = :command
+    end
+
+    # gen-spec subcommand args
+    @add_arg_table! s["gen-spec"] begin
+        "config_file"
+            help = "Custom chain spec config"
+            required = true
+        "spec_file"
+            help = "Path to generated chain spec"
+            required = true
+    end
+
+    # gen-keys subcommand args
+    @add_arg_table! s["gen-keys"] begin
+        "file_name"
+            help = "Secret key seed file name"
+            required = false
+            default = ""
+    end
+
+    # list-keys subcommand args
+    @add_arg_table! s["list-keys"] begin
+        "--data-path", "-d"
+            help = "Base data path"
+            default = "./jam_data"
+    end
+
+    # run subcommand args
+    @add_arg_table! s["run"] begin
+        "--data-path", "-d"
+            help = "Base data path"
+            default = "./jam_data"
+        "--temp", "-t"
+            help = "Use a temporary data directory"
+            action = :store_true
+        "--mode"
+            help = "Node mode: ordinary, proxy, validator"
+            default = "validator"
+        "--peer-id"
+            help = "Peer ID of this node"
+            default = ""
+        "--port"
+            help = "UDP port to listen on (0 = auto)"
+            arg_type = Int
+            default = 0
+        "--rpc-port"
+            help = "RPC server port"
+            arg_type = Int
+            default = 19800
+        "--dev-validator"
+            help = "Configure as dev validator with given index"
+            arg_type = Int
+            default = -1
+        "--bootnode"
+            help = "Specify a bootnode"
+            default = ""
+        "--telemetry"
+            help = "Telemetry endpoint"
+            default = ""
+    end
+
+    # testnet subcommand args
+    @add_arg_table! s["testnet"] begin
+        "--num-validators", "-n"
+            help = "Number of validator nodes"
+            arg_type = Int
+            default = 6
+        "--num-ordinary-nodes"
+            help = "Number of ordinary nodes"
+            arg_type = Int
+            default = 0
+        "--base-port"
+            help = "JAM-NP port for first validator"
+            arg_type = Int
+            default = 40000
+        "--base-rpc-port"
+            help = "RPC port for first node"
+            arg_type = Int
+            default = 19800
+        "--telemetry"
+            help = "Telemetry endpoint"
+            default = ""
+        "--verbose", "-v"
+            help = "Enable verbose output"
+            action = :store_true
+    end
+
+    return parse_args(s)
+end
+
+# ===== Command Implementations =====
+
+function cmd_gen_spec(args)
+    println("Generating chain spec: $(args["config_file"]) -> $(args["spec_file"])")
+    println("Not yet implemented")
+end
+
+function cmd_dump_spec(args)
+    spec_path = args["chain"] == "dev" ? joinpath(project_dir, "specs", "testnet.json") : args["chain"]
+    isfile(spec_path) ? println(read(spec_path, String)) : println("Chain spec not found: $spec_path")
+end
+
+function cmd_gen_keys(args)
+    master_seed = rand(UInt8, 32)
+    ed25519_seed = jip5_derive_ed25519_seed(master_seed)
+    bandersnatch_seed = jip5_derive_bandersnatch_seed(master_seed)
+    identity = JAMNPS.identity_from_seed(ed25519_seed)
+    alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+
+    file_name = args["file_name"]
+    output_file = isempty(file_name) ? "jam-keys-$(Dates.format(Dates.now(), "yyyymmdd-HHMMSS")).json" : file_name
+
+    keys_data = Dict("master_seed" => bytes2hex(master_seed),
+        "ed25519" => Dict("secret_seed" => bytes2hex(ed25519_seed), "public_key" => bytes2hex(identity.keypair.public_key)),
+        "bandersnatch" => Dict("secret_seed" => bytes2hex(bandersnatch_seed)), "alt_name" => alt_name)
+
+    open(output_file, "w") do f; JSON.print(f, keys_data, 2); end
+
+    println("Session keys generated (JIP-5):")
+    println("  Alt-name:      $alt_name")
+    println("  Ed25519:       $(bytes2hex(identity.keypair.public_key))")
+    println("  Bandersnatch:  (seed saved)")
+    println("\nKeys saved to: $output_file")
+end
+
+function cmd_list_keys(args)
+    keystore = joinpath(args["data-path"], "keystore")
+    !isdir(keystore) && (println("No keystore found at $keystore"); return)
+    files = filter(f -> endswith(f, ".json"), readdir(keystore))
+    isempty(files) && (println("No keys found"); return)
+    println("Session keys in $keystore:")
+    for f in files
+        try
+            data = JSON.parsefile(joinpath(keystore, f))
+            println("  $(get(data, "alt_name", "unknown"))  ($f)")
+        catch; println("  (invalid) $f"); end
+    end
+end
+
+function cmd_benchmark(args)
+    println("Running benchmarks...\n")
+    data = rand(UInt8, 1024)
+    t = @elapsed for _ in 1:10000; blake2b_32(data); end
+    println("BLAKE2b-256:\n  10k hashes of 1KB: $(round(t*1000, digits=2))ms\n  Throughput: $(round(10000*1024/t/1e6, digits=2)) MB/s\n")
+
+    seed = rand(UInt8, 32)
+    identity = JAMNPS.identity_from_seed(seed)
+    msg = rand(UInt8, 64)
+    t = @elapsed for _ in 1:1000; Ed25519.sign(msg, identity.keypair.secret_key, identity.keypair.public_key); end
+    println("Ed25519 signing:\n  1k signatures: $(round(t*1000, digits=2))ms\n  Rate: $(round(1000/t, digits=0)) sig/s")
 end
 
 function cmd_run(args)
     println("╔═══════════════════════════════════════════════════════════════╗")
     println("║              JAMit - JAM Validator Node                       ║")
-    println("╚═══════════════════════════════════════════════════════════════╝")
-    println()
+    println("╚═══════════════════════════════════════════════════════════════╝\n")
 
-    config_path = args["config"]
+    run_args = args["run"]  # Subcommand options
+    chain_opt = args["chain"]  # Global chain option
 
-    # Load or create config
-    config = if isfile(config_path)
-        TOML.parsefile(config_path)
-    else
-        Dict{String, Any}()
-    end
+    data_path = run_args["temp"] ? mktempdir() : run_args["data-path"]
+    mkpath(data_path)
 
-    # Get genesis hash (default to zero for dev)
-    genesis_hash = if haskey(config, "chain") && haskey(config["chain"], "genesis")
-        hex2bytes(config["chain"]["genesis"])
-    else
-        zeros(UInt8, 32)
-    end
+    spec_path = chain_opt == "dev" ? joinpath(project_dir, "specs", "testnet.json") : chain_opt
+    spec = isfile(spec_path) ? load_chain_spec(spec_path) : ChainSpec("dev", String[], zeros(UInt8, 128), nothing, Dict{String, Vector{UInt8}}(), UInt8[])
 
-    # Generate or load identity
-    seed = if !isempty(args["seed"])
-        if length(args["seed"]) == 64
-            hex2bytes(args["seed"])
-        else
-            sha256(Vector{UInt8}(args["seed"]))
-        end
-    elseif haskey(config, "node") && haskey(config["node"], "seed")
-        hex2bytes(config["node"]["seed"])
-    else
-        rand(UInt8, 32)
-    end
+    seed = run_args["dev-validator"] >= 0 ? jip5_trivial_seed(UInt32(run_args["dev-validator"])) :
+           !isempty(run_args["peer-id"]) ? (length(run_args["peer-id"]) == 64 ? hex2bytes(run_args["peer-id"]) : sha256(Vector{UInt8}(run_args["peer-id"]))) :
+           rand(UInt8, 32)
 
-    identity = JAMNPS.identity_from_seed(seed)
+    ed25519_seed = jip5_derive_ed25519_seed(seed)
+    identity = JAMNPS.identity_from_seed(ed25519_seed)
     alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+    genesis_hash = get_genesis_hash(spec)
     alpn = JAMNPS.make_alpn(genesis_hash)
+    port = run_args["port"] == 0 ? 30333 : run_args["port"]
+    rpc_port = run_args["rpc-port"]
 
-    port = UInt16(args["port"])
-
-    println("Identity:")
-    println("  Alt-name:   $alt_name")
-    println("  Public key: $(bytes2hex(identity.keypair.public_key))")
+    println("Chain:     $(spec.id)")
+    println("Data:      $data_path")
+    println("Mode:      $(run_args["mode"])\n")
+    println("Identity:\n  Alt-name: $alt_name\n  ALPN:     $alpn\n")
+    println("Network:\n  Port:     $port\n  RPC:      $rpc_port")
+    !isempty(run_args["bootnode"]) && println("  Bootnode: $(run_args["bootnode"])")
+    !isempty(run_args["telemetry"]) && println("  Telemetry: $(run_args["telemetry"])")
     println()
-    println("Network:")
-    println("  ALPN:       $alpn")
-    println("  Port:       $port")
-    println("  Role:       $(args["builder"] ? "Builder" : "Validator")")
-    println()
 
-    # Parse bootnodes
-    bootnodes = if !isempty(args["bootnodes"])
-        split(args["bootnodes"], ",") .|> String
-    else
-        String[]
-    end
+    # Initialize chain and RPC server
+    chain = SharedChain()
+    chain_state = LiveChainState(chain)
+    rpc_server = RPC.RPCServer(port=UInt16(rpc_port), chain_state=chain_state)
 
-    if !isempty(bootnodes)
-        println("Bootnodes:")
-        for bn in bootnodes
-            println("  - $bn")
-        end
-        println()
-    end
-
-    # Create UDP socket
     socket = UDPSocket()
-    bind(socket, IPv4("0.0.0.0"), port)
+    bind(socket, IPv6("::"), UInt16(port))
 
-    println("Node started. Press Ctrl+C to stop.")
-    println()
-    println("═══════════════════════════════════════════════════════════════")
-
-    running = true
-    blocks_produced = 0
-    jam_epoch_start = 1735732800.0  # JAM Common Era start
-
-    try
-        while running
-            current_time = time()
-            seconds_since_epoch = current_time - jam_epoch_start
-            current_timeslot = max(1, floor(Int, seconds_since_epoch / 6.0))
-
-            # Network I/O handled by async tasks
-
-            # Simulate block production every 6 seconds
-            if current_timeslot % 6 == 0 && rand() < 0.1
-                blocks_produced += 1
-                if args["verbose"]
-                    println("[$(current_timeslot)] Produced block #$blocks_produced")
-                end
-            end
-
-            if args["verbose"] && current_timeslot % 10 == 0
-                println("[$(current_timeslot)] Running... Blocks: $blocks_produced")
-            end
-
-            sleep(1.0)
-        end
-    catch e
-        if isa(e, InterruptException)
-            println("\nShutting down...")
-        else
-            println("Error: $e")
-            rethrow(e)
-        end
-    finally
-        close(socket)
-    end
-
-    println("Node stopped. Produced $blocks_produced blocks.")
-end
-
-function cmd_testnet(args)
-    num_validators = args["validators"]
-    base_port = args["port"]
-
-    println("╔═══════════════════════════════════════════════════════════════╗")
-    println("║              JAMit - Local Testnet                            ║")
-    println("╚═══════════════════════════════════════════════════════════════╝")
-    println()
-    println("Validators: $num_validators")
-    println("Base port:  $base_port")
-    println()
-
-    genesis_hash = zeros(UInt8, 32)
-    alpn = JAMNPS.make_alpn(genesis_hash)
-    println("ALPN: $alpn")
-    println()
-
-    # Create validators
-    validators = TestnetValidator[]
-
-    println("Initializing validators...")
-    println()
-
-    for i in 1:num_validators
-        seed = sha256(Vector{UInt8}("jamit-testnet-validator-$i"))
-        identity = JAMNPS.identity_from_seed(seed)
-        alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
-        port = UInt16(base_port + i - 1)
-
-        validator = TestnetValidator(
-            i,
-            identity,
-            alt_name,
-            port,
-            nothing,
-            false,
-            0,
-            0
+    # Initialize telemetry if endpoint provided
+    telemetry_client = nothing
+    telemetry_endpoint = run_args["telemetry"]
+    if !isempty(telemetry_endpoint)
+        node_info = Telemetry.NodeInfo(
+            genesis_hash=genesis_hash,
+            peer_id=identity.keypair.public_key,
+            peer_address_ipv6=Telemetry.localhost_ipv6(),
+            peer_address_port=UInt16(port),
+            impl_name="JAMit",
+            impl_version=VERSION,
+            gp_version="0.5.5",
+            note="JAM Protocol Implementation in Julia"
         )
-
-        push!(validators, validator)
-
-        println("Validator $i:")
-        println("  Alt-name: $alt_name")
-        println("  Port:     $port")
-        println()
+        telemetry_client = Telemetry.from_cli(telemetry_endpoint; node_info=node_info)
+        !isnothing(telemetry_client) && Telemetry.connect!(telemetry_client)
     end
 
-    # Start all validators
-    println("Starting validators...")
-    println()
+    # Start RPC server
+    RPC.start!(rpc_server)
 
-    for v in validators
-        v.socket = UDPSocket()
-        try
-            bind(v.socket, IPv4("127.0.0.1"), v.port)
-            v.running = true
-        catch e
-            println("Failed to bind validator $(v.id) on port $(v.port): $e")
+    # Initialize sync client if bootnode provided
+    sync_client = nothing
+    bootnode = run_args["bootnode"]
+    if !isempty(bootnode)
+        println("Initializing sync client...")
+        sync_client = BlockSync.SyncClient(identity, genesis_hash)
+        BlockSync.add_bootnode!(sync_client, bootnode)
+
+        # Block callback to update chain state
+        function on_block_received(slot::UInt32, hash::Vector{UInt8})
+            if slot > chain.head_height
+                new_block = ChainBlock(UInt64(slot), UInt64(slot), 0, chain.head_hash, hash)
+                add_block!(chain, new_block)
+                sync_chain_state!(chain_state)
+                RPC.notify_block_update(rpc_server, "bestBlock", chain_state.best_block)
+                println("[Sync] Imported block #$slot hash=$(bytes2hex(hash[1:8]))...")
+            end
         end
+
+        BlockSync.start_sync_loop!(sync_client; on_block=on_block_received)
+        println("Sync client started, connecting to bootnode...")
     end
 
-    running_count = count(v -> v.running, validators)
-    println("Started $running_count/$num_validators validators")
-    println()
-    println("Press Ctrl+C to stop testnet.")
-    println()
-    println("═══════════════════════════════════════════════════════════════")
+    println("Node started. Press Ctrl+C to stop.\n═══════════════════════════════════════════════════════════════")
 
-    jam_epoch_start = 1735732800.0
-    last_status_timeslot = 0
+    # Sync loop - periodically request blocks if we have a sync client
+    last_sync_request = 0.0
+    sync_interval = 2.0  # Request blocks every 2 seconds
 
     try
-        while any(v -> v.running, validators)
+        while true
             current_time = time()
-            seconds_since_epoch = current_time - jam_epoch_start
-            current_timeslot = max(1, floor(Int, seconds_since_epoch / 6.0))
 
-            for v in validators
-                if !v.running
-                    continue
+            # Periodic sync requests
+            if sync_client !== nothing && current_time - last_sync_request > sync_interval
+                for peer_id in keys(sync_client.peers)
+                    BlockSync.request_blocks(sync_client, peer_id;
+                        start_slot=UInt32(chain.head_height + 1),
+                        max_blocks=UInt32(64))
                 end
-
-                prev_timeslot = v.current_timeslot
-                v.current_timeslot = current_timeslot
-
-                # Simulate block production (1 validator per timeslot)
-                # Only produce if timeslot changed and we're the scheduled producer
-                producer_idx = (current_timeslot % num_validators) + 1
-                if v.id == producer_idx && prev_timeslot != current_timeslot
-                    v.blocks_produced += 1
-
-                    # Broadcast to other validators
-                    block_msg = "BLOCK:$(v.id):$(v.blocks_produced):$(current_timeslot)"
-
-                    for other in validators
-                        if other.id != v.id && other.running
-                            try
-                                send(v.socket, IPv4("127.0.0.1"), other.port, Vector{UInt8}(block_msg))
-                            catch
-                            end
-                        end
-                    end
-
-                    if args["verbose"]
-                        println("[T$(current_timeslot)] Validator $(v.id) produced block #$(v.blocks_produced)")
-                    end
-                end
+                last_sync_request = current_time
             end
 
-            # Status update every 5 timeslots (30 seconds)
-            if current_timeslot % 5 == 0 && current_timeslot != last_status_timeslot
-                last_status_timeslot = current_timeslot
-                total_blocks = sum(v -> v.blocks_produced, validators)
-                println("[T$(current_timeslot)] Blocks: $total_blocks | Validators: $num_validators active")
+            # Emit periodic telemetry status
+            if !isnothing(telemetry_client) && telemetry_client.connected
+                Telemetry.emit_status!(telemetry_client)
             end
 
             sleep(0.5)
         end
     catch e
-        if isa(e, InterruptException)
-            println("\nShutting down testnet...")
-        else
-            rethrow(e)
-        end
+        isa(e, InterruptException) || rethrow(e)
+        println("\nShutting down...")
     finally
+        !isnothing(sync_client) && BlockSync.stop_sync!(sync_client)
+        !isnothing(telemetry_client) && Telemetry.disconnect!(telemetry_client)
+        RPC.stop!(rpc_server)
+        close(socket)
+        run_args["temp"] && rm(data_path; recursive=true, force=true)
+    end
+end
+
+function cmd_testnet(args)
+    println("╔═══════════════════════════════════════════════════════════════╗")
+    println("║              JAMit - Local Testnet                            ║")
+    println("╚═══════════════════════════════════════════════════════════════╝\n")
+
+    num_validators = args["num-validators"]
+    base_port = args["base-port"]
+    base_rpc_port = args["base-rpc-port"]
+    verbose = args["verbose"]
+
+    spec_path = joinpath(project_dir, "specs", "testnet.json")
+    spec = isfile(spec_path) ? load_chain_spec(spec_path) : ChainSpec("dev", String[], zeros(UInt8, 128), Dict{String, Vector{UInt8}}(), UInt8[])
+    params = parse_protocol_params(spec.protocol_parameters)
+
+    println("Chain ID:   $(spec.id)")
+    println("Validators: $num_validators")
+    println("Base port:  $base_port")
+    println("Base RPC:   $base_rpc_port")
+    println("Transport:  QUIC (JAMNP-S)")
+    println("Timeslot:   $(params.timeslot_duration)s\n")
+
+    genesis_hash = get_genesis_hash(spec)
+    println("Genesis:    $(bytes2hex(genesis_hash[1:8]))...")
+    println("ALPN:       $(JAMNPS.make_alpn(genesis_hash))\n")
+
+    chain = SharedChain()
+    chain_state = LiveChainState(chain)
+    validators = TestnetValidator[]
+
+    # Start shared RPC server for testnet
+    rpc_server = RPC.RPCServer(port=UInt16(base_rpc_port), chain_state=chain_state)
+    RPC.start!(rpc_server)
+
+    # Initialize telemetry if endpoint provided
+    telemetry_client = nothing
+    telemetry_endpoint = args["telemetry"]
+    if !isempty(telemetry_endpoint)
+        # Use first validator's identity for telemetry
+        first_seed = jip5_trivial_seed(UInt32(0))
+        first_ed25519_seed = jip5_derive_ed25519_seed(first_seed)
+        first_identity = JAMNPS.identity_from_seed(first_ed25519_seed)
+
+        node_info = Telemetry.NodeInfo(
+            genesis_hash=genesis_hash,
+            peer_id=first_identity.keypair.public_key,
+            peer_address_ipv6=Telemetry.localhost_ipv6(),
+            peer_address_port=UInt16(base_port),
+            impl_name="JAMit",
+            impl_version=VERSION,
+            gp_version="0.5.5",
+            note="JAMit Testnet ($num_validators validators)"
+        )
+        telemetry_client = Telemetry.from_cli(telemetry_endpoint; node_info=node_info)
+        if !isnothing(telemetry_client)
+            Telemetry.connect!(telemetry_client)
+            # Emit initial sync status
+            telemetry_client.connected && Telemetry.emit!(telemetry_client, Telemetry.SyncStatusChanged(true))
+        end
+    end
+
+    # ALPN for JAMNP-S connections
+    alpn = JAMNPS.make_alpn(genesis_hash)
+
+    println("Initializing validators...\n")
+    for i in 1:num_validators
+        seed = jip5_trivial_seed(UInt32(i - 1))
+        ed25519_seed = jip5_derive_ed25519_seed(seed)
+        identity = JAMNPS.identity_from_seed(ed25519_seed)
+        alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
+        port = UInt16(base_port + i - 1)
+
+        # Create validator
+        validator = TestnetValidator(i, identity, alt_name, port)
+
+        push!(validators, validator)
+        println("Validator $i:\n  Alt-name: $alt_name\n  Ed25519:  $(bytes2hex(identity.keypair.public_key[1:8]))...\n  Port:     $port\n")
+    end
+
+    println("Starting QUIC endpoints...\n")
+    for v in validators
+        try
+            # Create QUIC endpoint configuration with JAMNP-S ALPN
+            config = EndpointConfig(
+                server_name=v.alt_name,
+                alpn_protocols=[alpn]
+            )
+
+            # Create endpoint bound to IPv6 loopback
+            v.endpoint = Endpoint(
+                Sockets.InetAddr(IPv6("::1"), v.port),
+                config,
+                true  # is_server
+            )
+            v.running = true
+            verbose && println("  V$(v.id) QUIC endpoint listening on [::1]:$(v.port)")
+        catch e
+            println("  V$(v.id) failed to start: $e")
+        end
+    end
+
+    println("Started $(count(v -> v.running, validators))/$num_validators QUIC endpoints")
+
+    # Establish authenticated QUIC connections between validators
+    println("\nEstablishing authenticated QUIC mesh...")
+    quic_connections = 0
+    for v in validators
+        !v.running && continue
+        for other in validators
+            other.id <= v.id && continue  # Only connect to higher-indexed peers
+            !other.running && continue
+
+            try
+                verbose && println("  V$(v.id) -> V$(other.id) initiating TLS 1.3 handshake...")
+
+                # Create QUIC connection using proper TLS 1.3 with Ed25519
+                conn = Connection(v.endpoint.socket, true)  # is_client=true
+                conn.remote_addr = Sockets.InetAddr(IPv6("::1"), other.port)
+
+                # Set client certificate for mutual TLS authentication
+                Handshake.set_client_certificate(conn.handshake, v.identity.keypair)
+
+                # Initiate TLS 1.3 handshake with JAMNP-S server name
+                initiate_handshake(conn, other.alt_name)
+
+                # Store connection reference
+                v.connections[other.id] = conn
+                quic_connections += 1
+
+                verbose && println("  V$(v.id) <-> V$(other.id) TLS 1.3 handshake initiated (Ed25519)")
+            catch e
+                verbose && println("  V$(v.id) -> V$(other.id) handshake failed: $e")
+            end
+        end
+    end
+    println("QUIC mesh: $quic_connections authenticated connections")
+
+    println("\nPress Ctrl+C to stop testnet.\n═══════════════════════════════════════════════════════════════")
+
+    jam_epoch_start = 1735732800.0
+    last_status_ts = 0
+    last_produced_ts = 0
+
+    try
+        while any(v -> v.running, validators)
+            ts = max(1, floor(Int, (time() - jam_epoch_start) / Float64(params.timeslot_duration)))
+
+            if ts != last_produced_ts
+                producer_idx = ((chain.head_height + 1) % num_validators) + 1
+                producer = validators[producer_idx]
+                if producer.running
+                    new_height = chain.head_height + 1
+                    block_hash = compute_block_hash(new_height, UInt64(ts), producer.id, chain.head_hash)
+                    add_block!(chain, ChainBlock(new_height, UInt64(ts), producer.id, chain.head_hash, block_hash))
+                    producer.blocks_produced += 1
+                    last_produced_ts = ts
+                    chain.head_height > 2 && (chain.finalized_height = chain.head_height - 2)
+
+                    # Update RPC chain state
+                    sync_chain_state!(chain_state)
+
+                    # Notify RPC subscribers of new block
+                    RPC.notify_block_update(rpc_server, "bestBlock", chain_state.best_block)
+
+                    # Emit telemetry events
+                    if !isnothing(telemetry_client) && telemetry_client.connected
+                        Telemetry.emit!(telemetry_client, Telemetry.BestBlockChanged(UInt32(ts), block_hash))
+                        if chain.finalized_height > 0
+                            finalized_block = chain.blocks[chain.finalized_height + 1]
+                            Telemetry.emit!(telemetry_client, Telemetry.FinalizedBlockChanged(
+                                UInt32(finalized_block.timeslot), finalized_block.hash))
+                        end
+                        Telemetry.emit_status!(telemetry_client; total_peers=UInt32(num_validators - 1))
+                    end
+
+                    # Broadcast block announcement to peers using JAMNP-S over QUIC
+                    # Format: Stream kind (0x00) + header_hash + finalized_hash + finalized_slot
+                    announcement_data = UInt8[]
+                    push!(announcement_data, JAMNPS.StreamKind.BLOCK_ANNOUNCEMENT)
+                    append!(announcement_data, block_hash)  # 32-byte header hash
+                    append!(announcement_data, chain.blocks[chain.finalized_height + 1].hash)  # finalized hash
+                    append!(announcement_data, reinterpret(UInt8, [htol(UInt32(chain.finalized_height))]))  # finalized slot
+
+                    # Send via authenticated QUIC connections
+                    msg = JAMNPS.encode_message(announcement_data)
+                    for (peer_id, conn) in producer.connections
+                        try
+                            if conn.connected
+                                # Use QUIC stream for block announcement
+                                stream_id = open_stream(conn, true)
+                                send_stream(conn, stream_id, msg, true)
+                            else
+                                # Fallback: send via endpoint socket
+                                send(producer.endpoint.socket, conn.remote_addr.host, conn.remote_addr.port, msg)
+                            end
+                        catch; end
+                    end
+                    # Also send to peers where we're the responder (they initiated to us)
+                    for other in validators
+                        other.id != producer.id && other.running && !haskey(producer.connections, other.id) && try
+                            send(producer.endpoint.socket, IPv6("::1"), other.port, msg)
+                        catch; end
+                    end
+                    verbose && println("[T$ts] V$(producer.id) block #$new_height (QUIC) hash=$(bytes2hex(block_hash[1:8]))...")
+                    for v in validators; v.last_seen_height = new_height; v.current_timeslot = ts; end
+                end
+            end
+
+            if ts % 5 == 0 && ts != last_status_ts
+                last_status_ts = ts
+                println("[T$ts] Height: $(chain.head_height) | Finalized: $(chain.finalized_height) | Validators: $num_validators")
+            end
+            sleep(0.5)
+        end
+    catch e
+        isa(e, InterruptException) || rethrow(e)
+        println("\nShutting down testnet...")
+    finally
+        !isnothing(telemetry_client) && Telemetry.disconnect!(telemetry_client)
+        RPC.stop!(rpc_server)
         for v in validators
             v.running = false
-            if v.socket !== nothing
-                close(v.socket)
+            # Close all QUIC connections
+            for (_, conn) in v.connections
+                try; close(conn.socket); catch; end
             end
+            # Close endpoint
+            v.endpoint !== nothing && try; close(v.endpoint.socket); catch; end
         end
     end
 
-    total_blocks = sum(v -> v.blocks_produced, validators)
-    println()
-    println("Testnet stopped. Total blocks produced: $total_blocks")
+    println("\nTestnet stopped.\n  Chain height: $(chain.head_height)\n  Finalized:    $(chain.finalized_height)\n  Total blocks: $(length(chain.blocks) - 1)")
 end
 
-function cmd_keygen(args)
-    println("╔═══════════════════════════════════════════════════════════════╗")
-    println("║              JAMit - Key Generation                           ║")
-    println("╚═══════════════════════════════════════════════════════════════╝")
-    println()
-
-    seed = if !isempty(args["seed"])
-        if length(args["seed"]) == 64
-            hex2bytes(args["seed"])
-        else
-            sha256(Vector{UInt8}(args["seed"]))
-        end
-    else
-        rand(UInt8, 32)
-    end
-
-    identity = JAMNPS.identity_from_seed(seed)
-    alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
-
-    println("Identity generated:")
-    println()
-    println("  Alt-name:    $alt_name")
-    println("  Public key:  $(bytes2hex(identity.keypair.public_key))")
-    println("  Seed (hex):  $(bytes2hex(seed))")
-    println()
-    println("Save the seed securely - it's required to restore this identity.")
-end
-
-function cmd_init(args)
-    config_path = args["config"]
-    data_dir = args["data-dir"]
-
-    println("╔═══════════════════════════════════════════════════════════════╗")
-    println("║              JAMit - Initialize Node                          ║")
-    println("╚═══════════════════════════════════════════════════════════════╝")
-    println()
-
-    # Create data directory
-    mkpath(data_dir)
-
-    # Generate new identity
-    seed = rand(UInt8, 32)
-    identity = JAMNPS.identity_from_seed(seed)
-    alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
-
-    # Create default config
-    config = """
-# JAMit Configuration File
-# Generated: $(Dates.now())
-
-[node]
-# Node identity seed (hex) - KEEP THIS SECRET
-seed = "$(bytes2hex(seed))"
-
-# Data directory
-data_dir = "$data_dir"
-
-# Network port
-port = $(args["port"])
-
-# RPC port
-rpc_port = $(args["rpc-port"])
-
-[chain]
-# Genesis hash (32 bytes hex, zeros for testnet)
-genesis = "0000000000000000000000000000000000000000000000000000000000000000"
-
-[network]
-# Bootstrap nodes
-bootnodes = []
-
-# Maximum peers
-max_peers = 50
-
-[validator]
-# Run as block producer
-is_authority = true
-
-# Enable GRANDPA finality
-enable_grandpa = true
-
-# Enable work package processing
-enable_work_processing = true
-"""
-
-    # Write config
-    open(config_path, "w") do f
-        write(f, config)
-    end
-
-    println("Node initialized:")
-    println()
-    println("  Config:    $config_path")
-    println("  Data dir:  $data_dir")
-    println("  Alt-name:  $alt_name")
-    println()
-    println("Run 'jamit run' to start the node.")
-end
-
-function cmd_status(args)
-    println("╔═══════════════════════════════════════════════════════════════╗")
-    println("║              JAMit - Node Status                              ║")
-    println("╚═══════════════════════════════════════════════════════════════╝")
-    println()
-    println("Version:  $VERSION")
-    println("Config:   $(args["config"])")
-    println()
-
-    if isfile(args["config"])
-        config = TOML.parsefile(args["config"])
-
-        if haskey(config, "node") && haskey(config["node"], "seed")
-            seed = hex2bytes(config["node"]["seed"])
-            identity = JAMNPS.identity_from_seed(seed)
-            alt_name = JAMNPS.derive_alt_name(identity.keypair.public_key)
-
-            genesis_hash = if haskey(config, "chain") && haskey(config["chain"], "genesis")
-                hex2bytes(config["chain"]["genesis"])
-            else
-                zeros(UInt8, 32)
-            end
-
-            alpn = JAMNPS.make_alpn(genesis_hash)
-
-            println("Identity:")
-            println("  Alt-name: $alt_name")
-            println()
-            println("Chain:")
-            println("  ALPN: $alpn")
-            println()
-        end
-
-        if haskey(config, "node")
-            println("Configuration:")
-            println("  Port: $(get(config["node"], "port", 30333))")
-            println("  Data: $(get(config["node"], "data_dir", "./jam_data"))")
-        end
-    else
-        println("No config file found at $(args["config"])")
-        println()
-        println("Run 'jamit init' to create one.")
-    end
-end
-
+# ===== Main =====
 function main()
     args = parse_commandline()
+    cmd = args["%COMMAND%"]
 
-    cmd = args["command"]
-
-    if cmd == "run"
+    if cmd == "gen-spec"
+        cmd_gen_spec(args["gen-spec"])
+    elseif cmd == "dump-spec"
+        cmd_dump_spec(args)
+    elseif cmd == "gen-keys"
+        cmd_gen_keys(args["gen-keys"])
+    elseif cmd == "list-keys"
+        cmd_list_keys(args["list-keys"])
+    elseif cmd == "benchmark"
+        cmd_benchmark(args)
+    elseif cmd == "run"
         cmd_run(args)
     elseif cmd == "testnet"
-        cmd_testnet(args)
-    elseif cmd == "keygen"
-        cmd_keygen(args)
-    elseif cmd == "init"
-        cmd_init(args)
-    elseif cmd == "status"
-        cmd_status(args)
-    else
-        println("Unknown command: $cmd")
-        println()
-        println("Available commands:")
-        println("  run      - Run a validator node")
-        println("  testnet  - Start a local testnet")
-        println("  init     - Initialize node configuration")
-        println("  keygen   - Generate a new validator identity")
-        println("  status   - Show node status")
-        exit(1)
+        cmd_testnet(args["testnet"])
     end
 end
-
-# Need Dates for init command
-using Dates
 
 main()

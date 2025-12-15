@@ -9,20 +9,23 @@ BatchedMerkleTree = "225b011c-e439-4471-b39b-04a9a0fe32f0"
 BinaryFields = "0fee9d7f-8397-4f0d-9ec6-117db1666467"
 BinaryReedSolomon = "8a283c49-c6d0-46c5-bbc1-5b2a51f34960"
 BitIntegers = "c3b6d118-76ef-56ca-8cc7-ebb389d030a1"
+Comonicon = "863f3e99-da2a-4334-8734-de3dacbe5542"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Keccak = "46f8cb0c-4e3a-418e-8a08-140a605d534d"
 Quic = "e87bf339-ccdf-4a5f-9274-4a3c1e6e3c8f"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [sources]
-Quic = {url = "https://github.com/rotkonetworks/Quic.jl.git", rev = "v0.2.0"}
+Quic = {path = "../quic.jl"}
 
 [compat]
+Comonicon = "1.0.8"
 StructArrays = "0.7.2"
 julia = "1.9"
 
