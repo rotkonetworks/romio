@@ -1,7 +1,17 @@
 jamtestvectors/
+jamtestvectors
 jam-test-vectors/
+jam-conformance/
+pvm-test-vectors/
 polkajam-nightly-*
 text/
+specs/
+
+# Build artifacts
+build/
+
+# Generated keys
+jam-keys-*.json
 
 # Development test files
 examples/
