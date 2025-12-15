@@ -17,6 +17,7 @@ Each host call has specific gas costs and can return various result codes.
 module HostCalls
 
 using StaticArrays
+using Dates
 
 # Import BLAKE2b - REQUIRED, no fallback
 # Security-critical: never silently degrade to insecure hash functions
@@ -62,6 +63,16 @@ const SOLICIT = 23
 const FORGET = 24
 const YIELD = 25
 const PROVIDE = 26
+
+# JIP-1: Debug log host call (available in all contexts)
+const LOG = 100
+
+# JIP-1: Log levels
+const LOG_LEVEL_FATAL = 0    # ⛔️ Fatal error
+const LOG_LEVEL_WARN = 1     # ⚠️ Warning
+const LOG_LEVEL_INFO = 2     # ℹ️ Important information
+const LOG_LEVEL_DEBUG = 3    # 💁 Helpful information
+const LOG_LEVEL_TRACE = 4    # 🪡 Pedantic information
 
 # ===== Return Codes =====
 const OK = UInt64(0)                              # Success
@@ -307,28 +318,67 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
         println("      CHECKPOINT: Creating exceptional_state checkpoint")
     end
 
-    if call_id == 100
-        # LOG host call - debug logging (gas cost: 0)
-        # Input: r7 = message pointer, r8 = message length
-        # Output: none (no side effects on invalid memory access)
-        msg_ptr = state.registers[8]   # r7
-        msg_len = state.registers[9]   # r8
+    if call_id == LOG
+        # JIP-1: LOG host call - debug logging
+        # Gas cost: 10 (same as unknown host call)
+        # Input registers (φ7⋯+5):
+        #   φ7 (r8 in Julia 1-indexed) = level
+        #   φ8 (r9) = target pointer
+        #   φ9 (r10) = target length
+        #   φ10 (r11) = message pointer
+        #   φ11 (r12) = message length
+        # Output: φ7' = WHAT (always, so behavior is same whether JIP implemented or not)
 
-        # Debug: show LOG parameters
-        println("      LOG params: ptr=0x$(string(msg_ptr, base=16)), len=$msg_len")
-
-        # No gas cost for LOG
-        # Try to read and print the log message
-        if msg_len > 0 && msg_len < 1024 && msg_ptr + msg_len <= length(state.memory.data)
-            msg_bytes = state.memory.data[(Int(msg_ptr) + 1):(Int(msg_ptr + msg_len))]
-            # Filter to printable ASCII
-            msg_str = String([b >= 32 && b < 127 ? Char(b) : '.' for b in msg_bytes])
-            println("      [LOG] $msg_str")
-        else
-            println("      [LOG] (invalid: len=$msg_len)")
+        state.gas -= 10
+        if state.gas < 0
+            state.status = :oog
+            return state
         end
 
-        # LOG has no output registers, just return
+        level = state.registers[8]      # φ7
+        target_ptr = state.registers[9]  # φ8
+        target_len = state.registers[10] # φ9
+        msg_ptr = state.registers[11]    # φ10
+        msg_len = state.registers[12]    # φ11
+
+        # Read target (null if both ptr and len are 0)
+        target_str = nothing
+        if !(target_ptr == 0 && target_len == 0)
+            if target_len > 0 && target_len < 256 && target_ptr + target_len <= length(state.memory.data)
+                target_bytes = state.memory.data[(Int(target_ptr) + 1):(Int(target_ptr + target_len))]
+                target_str = String([b >= 32 && b < 127 ? Char(b) : '.' for b in target_bytes])
+            end
+        end
+
+        # Read message
+        msg_str = ""
+        if msg_len > 0 && msg_len < 4096 && msg_ptr + msg_len <= length(state.memory.data)
+            msg_bytes = state.memory.data[(Int(msg_ptr) + 1):(Int(msg_ptr + msg_len))]
+            msg_str = String([b >= 32 && b < 127 ? Char(b) : '.' for b in msg_bytes])
+        end
+
+        # Get context info
+        core_id = haskey(context, :core_index) ? context[:core_index] : nothing
+        service_id = haskey(context, :service_id) ? context[:service_id] : nothing
+
+        # Format level
+        level_names = ["FATAL", "WARN", "INFO", "DEBUG", "TRACE"]
+        level_str = level < 5 ? level_names[Int(level) + 1] : "LEVEL$level"
+
+        # JIP-1 format: <YYYY-MM-DD hh-mm-ss> <LEVEL>[@<CORE>]?[#<SERVICE_ID>]? [<TARGET>]? <MESSAGE>
+        timestamp = Dates.format(Dates.now(), "yyyy/mm/dd HH:MM:SS")
+        location = ""
+        if core_id !== nothing
+            location *= "@$core_id"
+        end
+        if service_id !== nothing
+            location *= "#$service_id"
+        end
+        target_part = target_str !== nothing ? " $target_str" : ""
+        println("$timestamp $level_str$location$target_part $msg_str")
+
+        # Always return WHAT (per JIP-1 spec)
+        state.registers[8] = WHAT
         return state
     end
 
