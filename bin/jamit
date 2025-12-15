@@ -279,6 +279,7 @@ function cmd_testnet(args)
     println("═══════════════════════════════════════════════════════════════")
 
     jam_epoch_start = 1735732800.0
+    last_status_timeslot = 0
 
     try
         while any(v -> v.running, validators)
@@ -291,11 +292,13 @@ function cmd_testnet(args)
                     continue
                 end
 
+                prev_timeslot = v.current_timeslot
                 v.current_timeslot = current_timeslot
 
                 # Simulate block production (1 validator per timeslot)
+                # Only produce if timeslot changed and we're the scheduled producer
                 producer_idx = (current_timeslot % num_validators) + 1
-                if v.id == producer_idx && v.current_timeslot != current_timeslot
+                if v.id == producer_idx && prev_timeslot != current_timeslot
                     v.blocks_produced += 1
 
                     # Broadcast to other validators
@@ -314,15 +317,13 @@ function cmd_testnet(args)
                         println("[T$(current_timeslot)] Validator $(v.id) produced block #$(v.blocks_produced)")
                     end
                 end
-
-                # Receive messages (non-blocking via timeout)
-                # Note: Using async tasks for proper non-blocking I/O
             end
 
-            # Status update every 10 timeslots
-            if current_timeslot % 30 == 0
+            # Status update every 5 timeslots (30 seconds)
+            if current_timeslot % 5 == 0 && current_timeslot != last_status_timeslot
+                last_status_timeslot = current_timeslot
                 total_blocks = sum(v -> v.blocks_produced, validators)
-                println("[T$(current_timeslot)] Total blocks: $total_blocks")
+                println("[T$(current_timeslot)] Blocks: $total_blocks | Validators: $num_validators active")
             end
 
             sleep(0.5)
