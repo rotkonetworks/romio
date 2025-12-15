@@ -154,18 +154,7 @@ File: `src/rpc/server.jl:258-349`
 
 ## Next Steps
 
-1. ~~Debug accumulate test 2~~ DONE - Fixed LOG host call struct access
-2. Fix remaining test failures:
-   - Reports: 4 edge cases (wrong_assignment, etc.)
-   - Disputes: 6 edge cases (bad_vote_split, etc.)
-3. Implement native Bandersnatch VRF (replace Python helper)
-   - Option A: Rust FFI via ark-vrf with cdylib
-   - Option B: Pure Julia with SIMD (significant work)
-4. Add RPC method bodies for node operation
-5. Add persistent storage backend
-
-## Sources
-
-- [ark-vrf](https://github.com/davxy/ark-vrf) - Rust VRF implementation with Bandersnatch support
-- [jam-vrf](https://github.com/Zero-Trust-Collective/jam-vrf) - Python bindings (current approach)
-- [Bandersnatch VRF spec](https://github.com/davxy/bandersnatch-vrf-spec)
+1. Debug accumulate test 2 - trace PVM execution to find service validation issue
+2. Implement pure Bandersnatch VRF in Julia
+3. Complete host call implementations
+4. Add RPC method bodies
