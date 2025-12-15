@@ -1,4 +1,8 @@
 # src/types/basic.jl
+# Include guard to prevent multiple inclusions
+if !@isdefined(_BASIC_JL_INCLUDED)
+const _BASIC_JL_INCLUDED = true
+
 using StaticArrays
 
 # numeric types
@@ -51,3 +55,5 @@ function encode(x)::Vector{UInt8}
     end
     return take!(io)
 end
+
+end # include guard

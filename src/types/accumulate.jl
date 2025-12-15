@@ -1,6 +1,10 @@
 # src/types/accumulate.jl
 # Unified types for accumulate phase - consolidates host_calls.jl and types/service.jl
 
+# Include guard to prevent multiple inclusions
+if !@isdefined(_ACCUMULATE_JL_INCLUDED)
+const _ACCUMULATE_JL_INCLUDED = true
+
 include("basic.jl")
 
 """
@@ -275,3 +279,5 @@ end
 export PreimageRequest, DeferredTransfer, ServiceAccount, PrivilegedState
 export ImplicationsContext, HostCallContext
 export Balance, Gas, ServiceId, TimeSlot, Blob, Hash
+
+end # include guard
