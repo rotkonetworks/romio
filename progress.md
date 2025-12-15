@@ -3,21 +3,22 @@
 ## Status Overview
 
 **Core STF Tests: 10/10 passing (100%)**
+**Accumulate STF Tests: 30/30 passing (100%)**
 
 | Component | Status | Tests |
 |-----------|--------|-------|
 | Authorizations | DONE | 3/3 |
 | Statistics | DONE | 3/3 |
 | History | DONE | 4/4 |
-| Accumulate | WIP | 1/2 |
+| Accumulate | DONE | 30/30 |
 
 ## Priority Order (Host/Guest Execution Focus)
 
 ### P0: Critical for Chain Operation
 
-- [ ] **Fix Accumulate STF test 2** - PVM service validation failing at step 1076
-  - File: `src/stf/accumulate.jl`
-  - Issue: Service execution error in `process_one_immediate_report`
+- [x] **Fix Accumulate STF test 2** - FIXED: LOG host call used dict access on struct
+  - File: `src/pvm/host_calls.jl:361-362`
+  - Fix: Changed `haskey(context, :service_id)` to `context.service_id`
 
 - [ ] **Pure Bandersnatch VRF** - Currently uses Python helper
   - File: `src/crypto/vrf_helper.py` (to replace)

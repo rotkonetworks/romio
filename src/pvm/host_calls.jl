@@ -357,9 +357,9 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
             msg_str = String([b >= 32 && b < 127 ? Char(b) : '.' for b in msg_bytes])
         end
 
-        # Get context info
-        core_id = haskey(context, :core_index) ? context[:core_index] : nothing
-        service_id = haskey(context, :service_id) ? context[:service_id] : nothing
+        # Get context info from HostCallContext struct
+        core_id = nothing  # Not tracked in HostCallContext
+        service_id = context.service_id
 
         # Format level
         level_names = ["FATAL", "WARN", "INFO", "DEBUG", "TRACE"]
