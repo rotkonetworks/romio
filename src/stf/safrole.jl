@@ -13,15 +13,43 @@ const EPOCH_LENGTH_FULL = 600
 # For tiny: Y = 2, so tickets accepted in slots 0-9 of epoch
 const TAIL_SLOTS_TINY = 2
 
-# Path to the Python venv with jam-vrf installed
+# Try to load native Bandersnatch library, fall back to Python helper
+const _use_native_vrf = Ref{Union{Bool, Nothing}}(nothing)
+
+function use_native_vrf()::Bool
+    if _use_native_vrf[] === nothing
+        try
+            include(joinpath(@__DIR__, "..", "crypto", "bandersnatch.jl"))
+            _use_native_vrf[] = Main.Bandersnatch.is_available()
+        catch
+            _use_native_vrf[] = false
+        end
+    end
+    return _use_native_vrf[]
+end
+
+# Legacy Python paths (fallback if native unavailable)
 const PYTHON_VENV = joinpath(@__DIR__, "..", "..", ".venv", "bin", "python3")
 const VRF_HELPER = joinpath(@__DIR__, "..", "crypto", "vrf_helper.py")
 
 # Compute ticket ID from signature using Bandersnatch VRF
 # The ticket ID is the first 32 bytes of the SHA-512 hash of the VRF output point
 function compute_ticket_id(signature_hex::String)::Union{Vector{UInt8}, Nothing}
+    # Convert hex to bytes
+    sig_hex = startswith(signature_hex, "0x") ? signature_hex[3:end] : signature_hex
+    sig_bytes = hex2bytes(sig_hex)
+
+    # Try native library first
+    if use_native_vrf()
+        try
+            return Main.Bandersnatch.compute_ticket_id_from_signature(sig_bytes)
+        catch e
+            return nothing
+        end
+    end
+
+    # Fallback to Python helper
     try
-        # Call the Python helper to compute ticket ID
         sig_hex = startswith(signature_hex, "0x") ? signature_hex : "0x" * signature_hex
         result = read(`$PYTHON_VENV $VRF_HELPER ticket_id $sig_hex`, String)
         result = strip(result)
@@ -56,7 +84,32 @@ function verify_tickets(
     eta2::String,         # Epoch entropy (eta[2])
     tickets               # Array of tickets with :signature and :attempt
 )::Vector{Tuple{Union{Vector{UInt8}, Nothing}, Bool}}
-    # Build JSON request for batch verification
+    # Convert hex inputs to bytes
+    gamma_z_hex = startswith(gamma_z, "0x") ? gamma_z[3:end] : gamma_z
+    gamma_z_bytes = hex2bytes(gamma_z_hex)
+    eta2_hex = startswith(eta2, "0x") ? eta2[3:end] : eta2
+    eta2_bytes = hex2bytes(eta2_hex)
+
+    # Try native library first
+    if use_native_vrf()
+        try
+            # Convert tickets to format expected by native batch_verify_tickets
+            native_tickets = []
+            for t in tickets
+                sig_hex = string(get(t, :signature, ""))
+                sig_hex = startswith(sig_hex, "0x") ? sig_hex[3:end] : sig_hex
+                push!(native_tickets, (
+                    attempt = get(t, :attempt, 0),
+                    signature = hex2bytes(sig_hex)
+                ))
+            end
+            return Main.Bandersnatch.batch_verify_tickets(gamma_z_bytes, ring_size, eta2_bytes, native_tickets)
+        catch e
+            # Fall through to Python fallback
+        end
+    end
+
+    # Fallback to Python helper
     ticket_data = [Dict("attempt" => get(t, :attempt, 0), "signature" => string(get(t, :signature, ""))) for t in tickets]
     request = Dict(
         "commitment" => string(gamma_z),

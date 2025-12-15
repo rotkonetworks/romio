@@ -1,0 +1,18 @@
+[package]
+name = "bandersnatch-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bandersnatch_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+ark-serialize = "0.4"
+ark-vrf = { version = "0.1", features = ["bandersnatch", "ring"] }
+once_cell = "1.19"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -24,10 +24,11 @@
   - File: `src/pvm/host_calls.jl:361-362`
   - Fix: Changed `haskey(context, :service_id)` to `context.service_id`
 
-- [ ] **Pure Bandersnatch VRF** - Currently uses Python helper
-  - File: `src/crypto/vrf_helper.py` (to replace)
-  - Needed for: Ticket ID computation, ring proof verification
-  - Blocking: Full SAFROLE without external dependencies
+- [x] **Pure Bandersnatch VRF** - Native Rust FFI implementation
+  - File: `deps/bandersnatch-ffi/` (Rust cdylib)
+  - Julia wrapper: `src/crypto/bandersnatch.jl`
+  - Features: Ticket ID computation, ring proof verification, batch verification
+  - Uses: ark-vrf 0.1.1 with Zcash SRS parameters
 
 ### P1: Host Call Completion
 
@@ -104,6 +105,7 @@ File: `src/rpc/server.jl:258-349`
 - [x] Blake2b (native Julia)
 - [x] Keccak-256 (4-6x SIMD optimized)
 - [x] Key derivation
+- [x] Bandersnatch VRF (native Rust FFI via ark-vrf)
 
 ### Serialization
 - [x] JAM Codec (compact natural number encoding)
@@ -154,7 +156,7 @@ File: `src/rpc/server.jl:258-349`
 
 ## Next Steps
 
-1. Debug accumulate test 2 - trace PVM execution to find service validation issue
-2. Implement pure Bandersnatch VRF in Julia
-3. Complete host call implementations
+1. Fix remaining Reports tests (4 failing error handling cases)
+2. Fix remaining Disputes tests (6 failing edge cases)
+3. Complete host call implementations (selectors 3-6, 8-13)
 4. Add RPC method bodies

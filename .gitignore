@@ -12,6 +12,10 @@ build/jamit/
 build/jamit_sysimage.so
 build/*.so
 
+# Rust build artifacts
+deps/*/target/
+deps/**/Cargo.lock
+
 # Generated keys
 jam-keys-*.json
 
@@ -35,6 +39,8 @@ list_*.jl
 run_*.jl
 *.asm
 *.bin
+# Exception: Include VRF SRS parameters
+!deps/bandersnatch-ffi/parameters/*.bin
 *.polkavm
 *.pvm
 trace_*.txt
