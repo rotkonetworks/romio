@@ -58,6 +58,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-x64-julia-
 
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build Bandersnatch FFI
+        run: |
+          cd deps/bandersnatch-ffi
+          cargo build --release
+
       - name: Install dependencies
         run: |
           julia --project=. -e '
