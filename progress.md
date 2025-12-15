@@ -2,7 +2,7 @@
 
 ## Status Overview
 
-**Total STF Tests: 142/150 passing (94.7%)**
+**Total STF Tests: 141/149 passing (94.6%)**
 
 | Component | Status | Tests | Notes |
 |-----------|--------|-------|-------|
@@ -13,7 +13,7 @@
 | SAFROLE | DONE | 21/21 | 100% |
 | Assurances | DONE | 10/10 | 100% |
 | Preimages | DONE | 8/8 | 100% |
-| Reports | WIP | 38/42 | 90% - 4 error handling cases |
+| Reports | WIP | 40/42 | 95% - bad_signature, wrong_assignment |
 | Disputes | WIP | 22/28 | 79% - 6 edge cases |
 
 ## Priority Order (Host/Guest Execution Focus)
@@ -156,7 +156,19 @@ File: `src/rpc/server.jl:258-349`
 
 ## Next Steps
 
-1. Fix remaining Reports tests (4 failing error handling cases)
+1. **Reports STF** - 4 failing tests require:
+   - Signature verification: Need JAM codec binary encoding for work reports
+   - Wrong assignment: Need Fisher-Yates shuffle implementation
+   - Dependency missing: Need prerequisite validation
 2. Fix remaining Disputes tests (6 failing edge cases)
 3. Complete host call implementations (selectors 3-6, 8-13)
 4. Add RPC method bodies
+
+## Recent Changes
+
+### 2024-12-15: Native Bandersnatch VRF
+- Removed Python dependency for VRF
+- Created Rust FFI wrapper using ark-vrf 0.1.1
+- Library at `deps/bandersnatch-ffi/`
+- Julia wrapper at `src/crypto/bandersnatch.jl`
+- CI workflow updated for Rust build

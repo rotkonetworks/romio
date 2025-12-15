@@ -5,7 +5,7 @@ include("../../src/stf/reports.jl")
 println("=== Reports STF Test Suite ===\n")
 
 # Test vectors directory
-vectors_dir = "jam-test-vectors/stf/reports/tiny"
+vectors_dir = "jamtestvectors/stf/reports/tiny"
 
 # Get all test vectors
 test_vectors = filter(f -> endswith(f, ".json"), readdir(vectors_dir))
