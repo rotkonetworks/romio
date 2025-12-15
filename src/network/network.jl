@@ -2,11 +2,13 @@
 module Network
 
 using Quic
-using Quic.JAMNPS
 using Quic.Ed25519
 using Quic.X509
 using Quic.Crypto
 using Sockets
+
+include("jamnps.jl")
+using .JAMNPS
 
 export NetworkConfig, NetworkNode, Peer
 export start_network!, stop_network!, connect_peer!, broadcast_block!, broadcast_work_package!
