@@ -2,15 +2,19 @@
 
 ## Status Overview
 
-**Core STF Tests: 10/10 passing (100%)**
-**Accumulate STF Tests: 30/30 passing (100%)**
+**Total STF Tests: 142/150 passing (94.7%)**
 
-| Component | Status | Tests |
-|-----------|--------|-------|
-| Authorizations | DONE | 3/3 |
-| Statistics | DONE | 3/3 |
-| History | DONE | 4/4 |
-| Accumulate | DONE | 30/30 |
+| Component | Status | Tests | Notes |
+|-----------|--------|-------|-------|
+| Authorizations | DONE | 3/3 | 100% |
+| Statistics | DONE | 3/3 | 100% |
+| History | DONE | 4/4 | 100% |
+| Accumulate | DONE | 30/30 | 100% |
+| SAFROLE | DONE | 21/21 | 100% |
+| Assurances | DONE | 10/10 | 100% |
+| Preimages | DONE | 8/8 | 100% |
+| Reports | WIP | 38/42 | 90% - 4 error handling cases |
+| Disputes | WIP | 22/28 | 79% - 6 edge cases |
 
 ## Priority Order (Host/Guest Execution Focus)
 
