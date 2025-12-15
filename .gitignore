@@ -8,7 +8,9 @@ text/
 specs/
 
 # Build artifacts
-build/
+build/jamit/
+build/jamit_sysimage.so
+build/*.so
 
 # Generated keys
 jam-keys-*.json
