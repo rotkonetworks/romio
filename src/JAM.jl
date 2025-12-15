@@ -49,4 +49,31 @@ export H, H0, Hash, JAMErasure
 # Export codec functions
 export Codec, ComplexCodec, JAMCodec, Decoder
 
+# CLI entry point for PackageCompiler
+Base.@ccallable function julia_main()::Cint
+    try
+        # Find the project directory
+        # When compiled: executable is in <app>/bin/, project in <app>/share/julia/
+        exe_path = Base.julia_cmd().exec[1]
+        app_dir = dirname(dirname(exe_path))
+
+        if isfile(joinpath(app_dir, "share", "julia", "Project.toml"))
+            project_dir = joinpath(app_dir, "share", "julia")
+        else
+            # Development mode - use source tree
+            project_dir = dirname(dirname(@__FILE__))
+        end
+
+        # Include and run the CLI
+        include(joinpath(project_dir, "bin", "jamit"))
+        return 0
+    catch e
+        if e isa InterruptException
+            return 130
+        end
+        showerror(stderr, e, catch_backtrace())
+        return 1
+    end
+end
+
 end # module JAM

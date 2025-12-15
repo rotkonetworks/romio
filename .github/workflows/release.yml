@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            julia_arch: x64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+            julia_arch: aarch64
+          - os: macos-13
+            target: macos-x86_64
+            julia_arch: x64
+          - os: macos-14
+            target: macos-aarch64
+            julia_arch: aarch64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.11'
+          arch: ${{ matrix.julia_arch }}
+
+      - name: Cache Julia packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.julia/artifacts
+            ~/.julia/packages
+            ~/.julia/registries
+          key: ${{ runner.os }}-${{ matrix.julia_arch }}-julia-${{ hashFiles('**/Manifest.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.julia_arch }}-julia-
+
+      - name: Install dependencies
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.add("PackageCompiler")
+          '
+
+      - name: Build binary
+        run: |
+          julia --project=. build/build_app.jl
+
+      - name: Prepare artifact
+        run: |
+          # The binary is at build/jamit/bin/jamit
+          chmod +x build/jamit/bin/jamit
+          cp build/jamit/bin/jamit jamit-${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jamit-${{ matrix.target }}
+          path: jamit-${{ matrix.target }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            cp "$dir"/* release/
+          done
+          chmod +x release/*
+          ls -la release/
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: JAMit ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          files: release/*
+          body: |
+            ## JAMit ${{ steps.version.outputs.version }}
+
+            JAM Protocol implementation in Julia.
+
+            ### Downloads
+
+            | Platform | Binary |
+            |----------|--------|
+            | Linux x86_64 | `jamit-linux-x86_64` |
+            | Linux aarch64 | `jamit-linux-aarch64` |
+            | macOS x86_64 | `jamit-macos-x86_64` |
+            | macOS aarch64 | `jamit-macos-aarch64` |
+
+            ### Usage
+
+            ```bash
+            # Download and make executable
+            chmod +x jamit-linux-x86_64
+            ./jamit-linux-x86_64 --help
+            ```
