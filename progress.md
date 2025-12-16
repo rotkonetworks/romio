@@ -2,7 +2,7 @@
 
 ## Status Overview
 
-**Total STF Tests: 141/149 passing (94.6%)**
+**Total STF Tests: 149/149 passing (100%)**
 
 | Component | Status | Tests | Notes |
 |-----------|--------|-------|-------|
@@ -13,8 +13,8 @@
 | SAFROLE | DONE | 21/21 | 100% |
 | Assurances | DONE | 10/10 | 100% |
 | Preimages | DONE | 8/8 | 100% |
-| Reports | WIP | 40/42 | 95% - bad_signature, wrong_assignment |
-| Disputes | WIP | 22/28 | 79% - 6 edge cases |
+| Reports | DONE | 42/42 | 100% |
+| Disputes | DONE | 28/28 | 100% |
 
 ## Priority Order (Host/Guest Execution Focus)
 
@@ -156,15 +156,44 @@ File: `src/rpc/server.jl:258-349`
 
 ## Next Steps
 
-1. **Reports STF** - 4 failing tests require:
-   - Signature verification: Need JAM codec binary encoding for work reports
-   - Wrong assignment: Need Fisher-Yates shuffle implementation
-   - Dependency missing: Need prerequisite validation
-2. Fix remaining Disputes tests (6 failing edge cases)
-3. Complete host call implementations (selectors 3-6, 8-13)
-4. Add RPC method bodies
+1. Complete host call implementations (selectors 3-6, 8-13)
+2. Add RPC method bodies
+3. Full GRANDPA testing with network
 
 ## Recent Changes
+
+### 2024-12-16: SAFROLE STF Complete (21/21)
+- Fixed gamma_a type conversion for ticket accumulator
+  - Convert JSON3.Array to mutable Vector{Any} before insertion
+- Added ticket ordering validation (bad_ticket_order)
+  - Tickets must be sorted by ticket ID in ascending order per graypaper eq. 315
+- Added duplicate ticket detection (duplicate_ticket)
+  - No duplicates within submission batch
+  - No duplicates with existing accumulator per graypaper eq. 316
+- File: `src/stf/safrole.jl`
+
+### 2024-12-16: Disputes STF Complete (28/28)
+- Implemented Ed25519 signature verification for verdict votes
+  - Context: "jam_valid" for true votes, "jam_invalid" for false votes
+  - Message format: context || report_hash
+- Implemented judgement age validation
+  - age=0 → use kappa (current epoch validators)
+  - age=current_epoch-1 → use lambda (previous epoch validators)
+- Implemented culprit/fault key validation against kappa ∪ lambda - offenders
+- Implemented vote split validation per graypaper eq. 89-103
+  - true_votes must be exactly floor(2V/3)+1 (good), 0 (bad), or floor(V/3) (wonky)
+- Added culprit signature verification ("jam_guarantee" || report_hash)
+- Added fault signature verification (same context as verdicts)
+- File: `src/stf/disputes.jl`
+
+### 2024-12-16: Reports STF Complete (42/42)
+- Fixed binary report parsing to correctly extract signatures from test vectors
+- Implemented epoch-based validator selection for signature verification
+  - Previous epoch guarantees use prev_validators
+  - Current epoch guarantees use curr_validators
+- Implemented Gray Paper shuffle (equations 329-331) for validator-core assignment
+- Fixed wrong_assignment check for rotation 3 edge case
+- File: `src/stf/reports.jl`
 
 ### 2024-12-15: Native Bandersnatch VRF
 - Removed Python dependency for VRF

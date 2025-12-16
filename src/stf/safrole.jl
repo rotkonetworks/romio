@@ -142,9 +142,55 @@ function process_safrole(
         end
     end
 
-    # 5. Insert valid tickets into gamma_a (ticket accumulator)
+    # 5. Check ticket ordering - tickets must be sorted by ticket ID (ascending)
+    # Per graypaper eq. 315: n = orderuniqby{x.id}{x ∈ n}
+    for i in 1:(length(verified) - 1)
+        id1, _ = verified[i]
+        id2, _ = verified[i + 1]
+        if id1 !== nothing && id2 !== nothing
+            if id1 >= id2
+                return (pre_state, :bad_ticket_order)
+            end
+        end
+    end
+
+    # 6. Check for duplicate ticket IDs within submission batch
+    seen_ids = Set{Vector{UInt8}}()
+    for (ticket_id, _) in verified
+        if ticket_id !== nothing
+            if ticket_id in seen_ids
+                return (pre_state, :duplicate_ticket)
+            end
+            push!(seen_ids, ticket_id)
+        end
+    end
+
+    # 7. Check for duplicates with existing accumulator
+    # Per graypaper eq. 316: {x.id | x ∈ n} ⊥ {x.id | x ∈ γ_a}
+    gamma_a_existing = get(pre_state, :gamma_a, [])
+    existing_ids = Set{Vector{UInt8}}()
+    for entry in gamma_a_existing
+        entry_id = get(entry, :id, nothing)
+        if entry_id !== nothing
+            # Convert hex string to bytes if needed
+            if entry_id isa String
+                id_hex = startswith(entry_id, "0x") ? entry_id[3:end] : entry_id
+                push!(existing_ids, hex2bytes(id_hex))
+            elseif entry_id isa AbstractVector{UInt8}
+                push!(existing_ids, Vector{UInt8}(entry_id))
+            end
+        end
+    end
+    for (ticket_id, _) in verified
+        if ticket_id !== nothing && ticket_id in existing_ids
+            return (pre_state, :duplicate_ticket)
+        end
+    end
+
+    # 8. Insert valid tickets into gamma_a (ticket accumulator)
     # Using Outside-in insertion per graypaper section 6.3
-    gamma_a = copy(get(pre_state, :gamma_a, []))
+    # Convert to mutable Vector{Any} to allow mixed types
+    gamma_a = Vector{Any}(collect(get(pre_state, :gamma_a, [])))
 
     for (i, ticket) in enumerate(tickets)
         ticket_id, _ = verified[i]
@@ -171,3 +217,72 @@ function process_safrole(
 
     return (new_state, :ok)
 end
+
+# Run safrole test vector
+function run_safrole_test_vector(filepath::String)
+    println("\n=== Running Safrole Test Vector: $(basename(filepath)) ===")
+
+    # Load test vector
+    json_str = read(filepath, String)
+    tv = JSON3.read(json_str)
+
+    # Parse input
+    slot = tv[:input][:slot]
+    entropy = tv[:input][:entropy]
+    extrinsic = tv[:input][:extrinsic]
+
+    # Parse pre-state
+    pre_state = Dict{Symbol, Any}()
+    pre_state[:tau] = tv[:pre_state][:tau]
+    pre_state[:eta] = tv[:pre_state][:eta]
+    pre_state[:kappa] = tv[:pre_state][:kappa]
+    pre_state[:lambda] = tv[:pre_state][:lambda]
+    pre_state[:gamma_k] = get(tv[:pre_state], :gamma_k, [])
+    pre_state[:gamma_a] = get(tv[:pre_state], :gamma_a, [])
+    pre_state[:gamma_s] = get(tv[:pre_state], :gamma_s, [])
+    pre_state[:gamma_z] = get(tv[:pre_state], :gamma_z, "0x" * "00"^48)
+    pre_state[:iota] = get(tv[:pre_state], :iota, [])
+
+    println("Input:")
+    println("  Slot: $slot")
+    println("  Extrinsic tickets: $(length(extrinsic))")
+
+    # Run state transition
+    new_state, result = process_safrole(pre_state, slot, entropy, extrinsic)
+
+    # Check expected output
+    expected_output = tv[:output]
+
+    println("\n=== State Comparison ===")
+
+    if haskey(expected_output, :err)
+        # Expected an error
+        expected_err = Symbol(expected_output[:err])
+        if result == expected_err
+            println("  Correct error returned: $result")
+            println("\n=== Test Vector Result ===")
+            println("  PASS")
+            return true
+        else
+            println("  Wrong error: expected $expected_err, got $result")
+            println("\n=== Test Vector Result ===")
+            println("  FAIL")
+            return false
+        end
+    else
+        # Expected success
+        if result == :ok
+            println("  Success as expected")
+            println("\n=== Test Vector Result ===")
+            println("  PASS")
+            return true
+        else
+            println("  Expected success, got error: $result")
+            println("\n=== Test Vector Result ===")
+            println("  FAIL")
+            return false
+        end
+    end
+end
+
+export process_safrole, run_safrole_test_vector

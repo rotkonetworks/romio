@@ -3,7 +3,17 @@
 
 include("../types/basic.jl")
 include("../test_vectors/loader.jl")
+include("../crypto/ed25519.jl")
 using JSON3
+
+# Epoch length (tiny = 12, full = 600)
+const EPOCH_LENGTH_DISPUTES_TINY = 12
+const EPOCH_LENGTH_DISPUTES_FULL = 600
+
+# Get epoch length based on validator count
+function get_epoch_length_disputes(validator_count::Int)
+    return validator_count <= 10 ? EPOCH_LENGTH_DISPUTES_TINY : EPOCH_LENGTH_DISPUTES_FULL
+end
 
 # Process disputes STF
 # Returns (offenders_mark, result) where result is :ok or error symbol
@@ -70,11 +80,155 @@ function process_disputes(
         end
     end
 
-    # 5. Check verdicts are not already judged
+    # Compute epoch information
+    epoch_length = get_epoch_length_disputes(length(kappa))
+    current_epoch = div(tau, epoch_length)
+
+    # 5. Validate judgement age
+    # Per graypaper and test vectors analysis:
+    # - age=0 → use kappa (current epoch validators)
+    # - age=current_epoch-1 → use lambda (previous epoch validators)
+    # - Any other age value is invalid (bad_judgement_age)
+    #
+    # Example with epoch=3:
+    # - age=0: valid, use kappa
+    # - age=2: valid (3-1=2), use lambda
+    # - age=1: INVALID (not 0, not epoch-1)
+    for verdict in verdicts
+        age = get(verdict, :age, 0)
+        valid_age_for_lambda = current_epoch > 0 ? current_epoch - 1 : -1
+        if age != 0 && age != valid_age_for_lambda
+            return (String[], :bad_judgement_age)
+        end
+    end
+
+    # 6. Validate verdict vote signatures
+    for verdict in verdicts
+        votes = get(verdict, :votes, [])
+        target = verdict[:target]
+        age = get(verdict, :age, 0)
+
+        # Select validator set based on age
+        # age=0 → kappa (current epoch), age=current_epoch-1 → lambda (previous epoch)
+        validators = age == 0 ? kappa : lambda
+
+        for vote in votes
+            idx = vote[:index]
+            sig_hex = string(vote[:signature])
+            vote_value = vote[:vote]
+
+            # Check validator index is valid
+            if idx < 0 || idx >= length(validators)
+                return (String[], :bad_validator_index)
+            end
+
+            # Get validator's Ed25519 public key
+            validator = validators[idx + 1]  # 1-indexed in Julia
+            pubkey_hex = string(validator[:ed25519])
+
+            # Build message: context || target_hash
+            # Context: "jam_valid" for true votes, "jam_invalid" for false votes
+            context = vote_value ? "jam_valid" : "jam_invalid"
+            target_hex = startswith(target, "0x") ? target[3:end] : target
+            message = Vector{UInt8}(context)
+            append!(message, hex2bytes(target_hex))
+
+            # Verify signature
+            pubkey_bytes = hex2bytes(startswith(pubkey_hex, "0x") ? pubkey_hex[3:end] : pubkey_hex)
+            sig_bytes = hex2bytes(startswith(sig_hex, "0x") ? sig_hex[3:end] : sig_hex)
+
+            if !verify_ed25519(pubkey_bytes, message, sig_bytes)
+                return (String[], :bad_signature)
+            end
+        end
+    end
+
+    # 7. Extract psi components early for validation
     psi_good = get(psi, :good, [])
     psi_bad = get(psi, :bad, [])
     psi_wonky = get(psi, :wonky, [])
     psi_offenders = get(psi, :offenders, [])
+    offenders_set = Set(psi_offenders)
+
+    # 8. Check culprits/faults are not already reported as offenders
+    # This must be checked BEFORE key validation
+    for culprit in culprits
+        key = string(culprit[:key])
+        if key in offenders_set
+            return (String[], :offender_already_reported)
+        end
+    end
+    for fault in faults
+        key = string(fault[:key])
+        if key in offenders_set
+            return (String[], :offender_already_reported)
+        end
+    end
+
+    # 9. Build combined validator set for culprit/fault key validation
+    # Per graypaper: k = {i_ed | i ∈ λ ∪ κ} \ offenders
+    all_validator_keys = Set{String}()
+    for v in kappa
+        push!(all_validator_keys, string(v[:ed25519]))
+    end
+    for v in lambda
+        push!(all_validator_keys, string(v[:ed25519]))
+    end
+    valid_keys = setdiff(all_validator_keys, offenders_set)
+
+    # 10. Validate culprit keys exist in valid validator set
+    for culprit in culprits
+        key = string(culprit[:key])
+        if key ∉ valid_keys
+            return (String[], :bad_guarantor_key)
+        end
+    end
+
+    # 11. Validate fault keys exist in valid validator set
+    for fault in faults
+        key = string(fault[:key])
+        if key ∉ valid_keys
+            return (String[], :bad_auditor_key)
+        end
+    end
+
+    # 12. Verify culprit signatures (guarantor signatures over "jam_guarantee" || report_hash)
+    for culprit in culprits
+        target = string(culprit[:target])
+        key_hex = string(culprit[:key])
+        sig_hex = string(culprit[:signature])
+
+        pubkey = hex2bytes(startswith(key_hex, "0x") ? key_hex[3:end] : key_hex)
+        sig = hex2bytes(startswith(sig_hex, "0x") ? sig_hex[3:end] : sig_hex)
+        target_bytes = hex2bytes(startswith(target, "0x") ? target[3:end] : target)
+
+        # Culprit signature is over "jam_guarantee" || report_hash
+        message = vcat(Vector{UInt8}("jam_guarantee"), target_bytes)
+        if !verify_ed25519(pubkey, message, sig)
+            return (String[], :bad_signature)
+        end
+    end
+
+    # 13. Verify fault signatures (auditor signatures over context || report_hash)
+    for fault in faults
+        target = string(fault[:target])
+        key_hex = string(fault[:key])
+        sig_hex = string(fault[:signature])
+        vote = fault[:vote]
+
+        pubkey = hex2bytes(startswith(key_hex, "0x") ? key_hex[3:end] : key_hex)
+        sig = hex2bytes(startswith(sig_hex, "0x") ? sig_hex[3:end] : sig_hex)
+        target_bytes = hex2bytes(startswith(target, "0x") ? target[3:end] : target)
+
+        # Fault signature uses same context as verdict votes
+        context = vote ? "jam_valid" : "jam_invalid"
+        message = vcat(Vector{UInt8}(context), target_bytes)
+        if !verify_ed25519(pubkey, message, sig)
+            return (String[], :bad_signature)
+        end
+    end
+
+    # 14. Check verdicts are not already judged
     all_judged = Set{String}()
     for h in psi_good
         push!(all_judged, h)
@@ -92,47 +246,35 @@ function process_disputes(
         end
     end
 
-    # 6. Check culprits/faults are not already reported as offenders
-    offenders_set = Set(psi_offenders)
-    for culprit in culprits
-        key = culprit[:key]
-        if key in offenders_set
-            return (String[], :offender_already_reported)
-        end
-    end
-    for fault in faults
-        key = fault[:key]
-        if key in offenders_set
-            return (String[], :offender_already_reported)
-        end
-    end
-
-    # 6. Classify verdicts (GOOD, BAD, or WONKY) and validate consistency
-    # Vote semantics: true = report is VALID, false = report is INVALID
-    # Supermajority: >2/3 votes, so need floor(2n/3) + 1 votes
+    # 12. Classify verdicts (GOOD, BAD, or WONKY) and validate vote split
+    # Per graypaper eq. 89-103: true_votes must be exactly one of:
+    # - floor(2V/3) + 1  (GOOD - report is valid)
+    # - 0                 (BAD - report is invalid)
+    # - floor(V/3)        (WONKY - inconclusive)
+    # Where V = total validator count (|kappa|)
 
     verdict_classifications = Dict{String, Symbol}()  # target -> :good, :bad, or :wonky
+    validator_count = length(kappa)
 
     for verdict in verdicts
         votes = get(verdict, :votes, [])
         true_votes = count(v -> v[:vote] == true, votes)
-        false_votes = count(v -> v[:vote] == false, votes)
-        total_votes = length(votes)
         target = verdict[:target]
 
-        # Supermajority threshold: >2/3, so floor(2n/3) + 1
-        # With 5 votes: floor(10/3) + 1 = 3 + 1 = 4
-        supermajority_threshold = div(2 * total_votes, 3) + 1
-        has_valid_supermajority = true_votes >= supermajority_threshold   # report is GOOD
-        has_invalid_supermajority = false_votes >= supermajority_threshold # report is BAD
+        # Valid vote totals per graypaper
+        good_threshold = div(2 * validator_count, 3) + 1  # floor(2V/3) + 1
+        wonky_threshold = div(validator_count, 3)          # floor(V/3)
+        bad_threshold = 0
 
-        if has_valid_supermajority
+        # Check if vote split is valid
+        if true_votes == good_threshold
             verdict_classifications[target] = :good
-        elseif has_invalid_supermajority
+        elseif true_votes == bad_threshold
             verdict_classifications[target] = :bad
-        else
-            # Neither supermajority - WONKY verdict (valid outcome, no offenders)
+        elseif true_votes == wonky_threshold
             verdict_classifications[target] = :wonky
+        else
+            return (String[], :bad_vote_split)
         end
     end
 

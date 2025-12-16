@@ -108,6 +108,12 @@ const Cmemosize = 128         # transfer memo size (bytes)
 const Cminpublicindex = 2^16  # minimum public service index
 const Ccorecount = 2          # tiny chainspec (will be 341 in production)
 
+# ===== Debug Trace Flags =====
+# Set to true to enable verbose debug output
+const TRACE_HOST_CALLS = false  # Trace all host call invocations
+const TRACE_FETCH = false       # Trace FETCH host call details
+const TRACE_EJECT = false       # Trace EJECT host call details
+
 # ===== Helper Functions =====
 
 """
@@ -295,27 +301,29 @@ function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbo
     # All host calls cost at least 10 gas (base cost)
     # Additional costs may be added by specific functions
 
-    # Debug: trace ALL host calls
-    step = get(task_local_storage(), :pvm_step_count, 0)
-    if call_id <= 25  # Real host calls
-        host_names = ["GAS", "FETCH", "LOOKUP", "READ", "WRITE", "INFO", "EMIT", "7", "MACHINE", "PEEK", "POKE", "INVOKE", "PAGES", "EXPUNGE", "BLESS", "ASSIGN", "DESIGNATE", "CHECKPOINT", "NEW", "UPGRADE", "TRANSFER", "EJECT", "SOLICIT", "FORGET", "HISTORICAL_LOOKUP"]
-        name = call_id < length(host_names) ? host_names[call_id + 1] : "UNKNOWN"
-        println("    [HOST CALL step=$step] id=$call_id ($name) invocation=$invocation_type")
-    elseif call_id == 100
-        println("    [HOST CALL step=$step] id=100 (LOG) invocation=$invocation_type")
-    else
-        println("    [HOST CALL step=$step] id=$call_id (UNKNOWN) invocation=$invocation_type")
-    end
+    # Debug: trace ALL host calls (guarded by TRACE_HOST_CALLS flag)
+    if TRACE_HOST_CALLS
+        step = get(task_local_storage(), :pvm_step_count, 0)
+        if call_id <= 25  # Real host calls
+            host_names = ["GAS", "FETCH", "LOOKUP", "READ", "WRITE", "INFO", "EMIT", "7", "MACHINE", "PEEK", "POKE", "INVOKE", "PAGES", "EXPUNGE", "BLESS", "ASSIGN", "DESIGNATE", "CHECKPOINT", "NEW", "UPGRADE", "TRANSFER", "EJECT", "SOLICIT", "FORGET", "HISTORICAL_LOOKUP"]
+            name = call_id < length(host_names) ? host_names[call_id + 1] : "UNKNOWN"
+            println("    [HOST CALL step=$step] id=$call_id ($name) invocation=$invocation_type")
+        elseif call_id == 100
+            println("    [HOST CALL step=$step] id=100 (LOG) invocation=$invocation_type")
+        else
+            println("    [HOST CALL step=$step] id=$call_id (UNKNOWN) invocation=$invocation_type")
+        end
 
-    # Detailed logging for specific calls
-    if call_id == WRITE
-        println("      WRITE: key_addr=$(state.registers[8]), key_len=$(state.registers[9]), val_addr=$(state.registers[10]), val_len=$(state.registers[11])")
-    elseif call_id == READ
-        println("      READ: key_addr=$(state.registers[8]), key_len=$(state.registers[9]), out_addr=$(state.registers[10])")
-    elseif call_id == BLESS
-        println("      BLESS: Creating checkpoint")
-    elseif call_id == CHECKPOINT
-        println("      CHECKPOINT: Creating exceptional_state checkpoint")
+        # Detailed logging for specific calls
+        if call_id == WRITE
+            println("      WRITE: key_addr=$(state.registers[8]), key_len=$(state.registers[9]), val_addr=$(state.registers[10]), val_len=$(state.registers[11])")
+        elseif call_id == READ
+            println("      READ: key_addr=$(state.registers[8]), key_len=$(state.registers[9]), out_addr=$(state.registers[10])")
+        elseif call_id == BLESS
+            println("      BLESS: Creating checkpoint")
+        elseif call_id == CHECKPOINT
+            println("      CHECKPOINT: Creating exceptional_state checkpoint")
+        end
     end
 
     if call_id == LOG
@@ -505,9 +513,11 @@ function host_call_fetch(state, context, invocation_type)
     idx1 = state.registers[12]          # r11
     idx2 = state.registers[13]          # r12
 
-    step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
-    # Log all FETCH calls to see what service is requesting
-    println("    [FETCH step=$step] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
+    # Log all FETCH calls (guarded by TRACE_FETCH flag)
+    if TRACE_FETCH
+        step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
+        println("    [FETCH step=$step] selector=$selector, idx1=$idx1, idx2=$idx2, out=0x$(string(output_offset, base=16)), src=$source_offset, len=$copy_length")
+    end
 
     # Determine what data to fetch based on selector
     data = nothing
@@ -515,7 +525,7 @@ function host_call_fetch(state, context, invocation_type)
     if selector == 0
         # Configuration constants (from tiny chainspec)
         data = encode_config_constants()
-        println("    [FETCH] selector=0 (config) returned $(length(data)) bytes")
+        TRACE_FETCH && println("    [FETCH] selector=0 (config) returned $(length(data)) bytes")
     elseif selector == 1
         # Entropy/timeslot hash (n)
         if context.entropy !== nothing
@@ -527,10 +537,111 @@ function host_call_fetch(state, context, invocation_type)
             # Encode as sequence of hashes
             data = vcat(context.recent_blocks...)
         end
+    elseif selector == 3
+        # Extrinsic by work item index (idx1) and extrinsic index (idx2): x̄[idx1][idx2]
+        # Per graypaper: x̄[r11][r12] when x̄ ≠ ⊥ ∧ r10=3 ∧ r11 < |x̄| ∧ r12 < |x̄[r11]|
+        if context.work_package !== nothing && haskey(context.work_package, :work_items)
+            work_items = context.work_package[:work_items]
+            if idx1 < length(work_items) && haskey(work_items[idx1 + 1], :extrinsics)
+                extrinsics = work_items[idx1 + 1][:extrinsics]
+                if idx2 < length(extrinsics)
+                    data = extrinsics[idx2 + 1]
+                end
+            end
+        end
+    elseif selector == 4
+        # Current work item's extrinsic at index: x̄[i][idx1]
+        # Per graypaper: x̄[i][r11] when x̄ ≠ ⊥ ∧ i ≠ ⊥ ∧ r10=4 ∧ r11 < |x̄[i]|
+        if context.work_package !== nothing && context.work_item_index !== nothing
+            work_items = get(context.work_package, :work_items, [])
+            i = context.work_item_index
+            if i < length(work_items) && haskey(work_items[i + 1], :extrinsics)
+                extrinsics = work_items[i + 1][:extrinsics]
+                if idx1 < length(extrinsics)
+                    data = extrinsics[idx1 + 1]
+                end
+            end
+        end
+    elseif selector == 5
+        # Import segment by work item index (idx1) and segment index (idx2): ī[idx1][idx2]
+        # Per graypaper: ī[r11][r12] when ī ≠ ⊥ ∧ r10=5 ∧ r11 < |ī| ∧ r12 < |ī[r11]|
+        if context.import_segments !== nothing
+            if idx1 < length(context.import_segments)
+                segments = context.import_segments[idx1 + 1]
+                if idx2 < length(segments)
+                    data = segments[idx2 + 1]
+                end
+            end
+        end
+    elseif selector == 6
+        # Current work item's import segment at index: ī[i][idx1]
+        # Per graypaper: ī[i][r11] when ī ≠ ⊥ ∧ i ≠ ⊥ ∧ r10=6 ∧ r11 < |ī[i]|
+        if context.import_segments !== nothing && context.work_item_index !== nothing
+            i = context.work_item_index
+            if i < length(context.import_segments)
+                segments = context.import_segments[i + 1]
+                if idx1 < length(segments)
+                    data = segments[idx1 + 1]
+                end
+            end
+        end
     elseif selector == 7
         # Work package encoded (p)
         if context.work_package !== nothing
             data = encode_work_package(context.work_package)
+        end
+    elseif selector == 8
+        # Work package auth config: p.auth_config
+        if context.work_package !== nothing
+            auth_config = get(context.work_package, :authorization, nothing)
+            if auth_config !== nothing
+                data = auth_config isa Vector{UInt8} ? auth_config : Vector{UInt8}(auth_config)
+            end
+        end
+    elseif selector == 9
+        # Work package auth token: p.auth_token
+        if context.work_package !== nothing
+            auth_token = get(context.work_package, :auth_token, nothing)
+            if auth_token !== nothing
+                data = auth_token isa Vector{UInt8} ? auth_token : Vector{UInt8}(auth_token)
+            end
+        end
+    elseif selector == 10
+        # Work package context encoded: encode(p.context)
+        if context.work_package !== nothing
+            wp_context = get(context.work_package, :context, nothing)
+            if wp_context !== nothing
+                data = encode_work_package_context(wp_context)
+            end
+        end
+    elseif selector == 11
+        # All work item summaries: encode(S(w) for w in work_items)
+        if context.work_package !== nothing && haskey(context.work_package, :work_items)
+            work_items = context.work_package[:work_items]
+            data = UInt8[]
+            append!(data, encode_jam_compact(length(work_items)))
+            for w in work_items
+                append!(data, encode_work_item_summary(w))
+            end
+        end
+    elseif selector == 12
+        # Specific work item summary: S(p.work_items[idx1])
+        if context.work_package !== nothing && haskey(context.work_package, :work_items)
+            work_items = context.work_package[:work_items]
+            if idx1 < length(work_items)
+                data = encode_work_item_summary(work_items[idx1 + 1])
+            end
+        end
+    elseif selector == 13
+        # Work item payload: p.work_items[idx1].payload
+        if context.work_package !== nothing && haskey(context.work_package, :work_items)
+            work_items = context.work_package[:work_items]
+            if idx1 < length(work_items)
+                payload = get(work_items[idx1 + 1], :payload, nothing)
+                if payload !== nothing
+                    data = payload isa Vector{UInt8} ? payload : Vector{UInt8}(payload)
+                end
+            end
         end
     elseif selector == 14
         # All accumulate inputs (transfers and operands) encoded: E(↕i)
@@ -550,7 +661,7 @@ function host_call_fetch(state, context, invocation_type)
                 # Operand data (already JAM-encoded)
                 append!(data, result)
             end
-            println("    [FETCH] selector=14 (all inputs) returned $(length(results)) items, $(length(data)) bytes total")
+            TRACE_FETCH && println("    [FETCH] selector=14 (all inputs) returned $(length(results)) items, $(length(data)) bytes total")
         end
     elseif selector == 15
         # Specific accumulate input at index idx1: E(i[idx1])
@@ -562,18 +673,20 @@ function host_call_fetch(state, context, invocation_type)
                 data = UInt8[]
                 append!(data, encode_jam_compact(0))  # kind = OPERAND
                 append!(data, results[idx1 + 1])  # Operand data
-                println("    [FETCH] selector=15 (input[$idx1]) returned $(length(data)) bytes")
+                TRACE_FETCH && println("    [FETCH] selector=15 (input[$idx1]) returned $(length(data)) bytes")
             else
-                println("    [FETCH] selector=15 (input[$idx1]) OUT OF BOUNDS (have $(length(results)) items)")
+                TRACE_FETCH && println("    [FETCH] selector=15 (input[$idx1]) OUT OF BOUNDS (have $(length(results)) items)")
             end
         end
-    # TODO: Implement other selectors (3-6, 8-13) as needed
+    # All selectors 0-15 implemented per graypaper
     end
 
     # If data is not available, return NONE
     if data === nothing
-        step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
-        println("    [FETCH step=$step] selector=$selector returned NONE (no data available) - SERVICE WILL LIKELY ERROR!")
+        if TRACE_FETCH
+            step = something(get(task_local_storage(), :pvm_step_count, nothing), 0)
+            println("    [FETCH step=$step] selector=$selector returned NONE (no data available) - SERVICE WILL LIKELY ERROR!")
+        end
         state.registers[8] = NONE
         return state
     end
@@ -664,6 +777,72 @@ function encode_work_package(pkg::Dict{Symbol, Any})::Vector{UInt8}
     # Simplified encoding - expand as needed
     result = UInt8[]
     # This is a placeholder - actual encoding would be more complex
+    return result
+end
+
+"""
+Encode work package context per graypaper.
+Context contains: lookup anchor time, prerequisites, etc.
+"""
+function encode_work_package_context(ctx)::Vector{UInt8}
+    result = UInt8[]
+    # anchor time (4 bytes)
+    anchor = get(ctx, :anchor, get(ctx, :lookup_anchor_time, UInt32(0)))
+    append!(result, reinterpret(UInt8, [UInt32(anchor)]))
+    # prerequisites hash (32 bytes)
+    prereq = get(ctx, :prerequisites_hash, zeros(UInt8, 32))
+    if prereq isa String
+        prereq_hex = startswith(prereq, "0x") ? prereq[3:end] : prereq
+        prereq = hex2bytes(prereq_hex)
+    end
+    append!(result, prereq)
+    return result
+end
+
+"""
+Encode work item summary per graypaper equation for S(w).
+S(w) = encode(service_id[4], code_hash[32], ref_gas_limit[8], acc_gas_limit[8],
+              export_count[2], import_segments_count[2], extrinsics_count[2], payload_len[4])
+"""
+function encode_work_item_summary(w)::Vector{UInt8}
+    result = UInt8[]
+
+    # service_id (4 bytes)
+    service_id = get(w, :service_id, get(w, :service, UInt32(0)))
+    append!(result, reinterpret(UInt8, [UInt32(service_id)]))
+
+    # code_hash (32 bytes)
+    code_hash = get(w, :code_hash, zeros(UInt8, 32))
+    if code_hash isa String
+        code_hash_hex = startswith(code_hash, "0x") ? code_hash[3:end] : code_hash
+        code_hash = hex2bytes(code_hash_hex)
+    end
+    append!(result, code_hash)
+
+    # ref_gas_limit (8 bytes)
+    ref_gas = get(w, :refine_gas_limit, get(w, :ref_gas_limit, UInt64(0)))
+    append!(result, reinterpret(UInt8, [UInt64(ref_gas)]))
+
+    # acc_gas_limit (8 bytes)
+    acc_gas = get(w, :accumulate_gas_limit, get(w, :acc_gas_limit, UInt64(0)))
+    append!(result, reinterpret(UInt8, [UInt64(acc_gas)]))
+
+    # export_count (2 bytes)
+    export_count = get(w, :export_count, UInt16(0))
+    append!(result, reinterpret(UInt8, [UInt16(export_count)]))
+
+    # import_segments_count (2 bytes)
+    import_segments = get(w, :import_segments, [])
+    append!(result, reinterpret(UInt8, [UInt16(length(import_segments))]))
+
+    # extrinsics_count (2 bytes)
+    extrinsics = get(w, :extrinsics, [])
+    append!(result, reinterpret(UInt8, [UInt16(length(extrinsics))]))
+
+    # payload_len (4 bytes)
+    payload = get(w, :payload, UInt8[])
+    append!(result, reinterpret(UInt8, [UInt32(length(payload))]))
+
     return result
 end
 
@@ -2176,7 +2355,7 @@ function host_call_eject(state, context)
     # Parse parameters
     service_to_eject = state.registers[8]      # r7
     hash_offset = UInt32(state.registers[9])   # r8
-    println("      [EJECT] service=$service_to_eject, hash_offset=$hash_offset, caller=$(context.service_id)")
+    TRACE_EJECT && println("      [EJECT] service=$service_to_eject, hash_offset=$hash_offset, caller=$(context.service_id)")
 
     # Check memory bounds for hash
     if !is_readable(state.memory.access, hash_offset, UInt32(32))
@@ -2196,7 +2375,7 @@ function host_call_eject(state, context)
 
     # Check if service_to_eject is valid (< 2^32)
     if service_to_eject >= 2^32
-        println("      [EJECT] FAIL: invalid service id")
+        TRACE_EJECT && println("      [EJECT] FAIL: invalid service id")
         state.registers[8] = WHO
         return state
     end
@@ -2205,14 +2384,14 @@ function host_call_eject(state, context)
 
     # Check if trying to eject self (not allowed)
     if eject_id == context.service_id
-        println("      [EJECT] FAIL: trying to eject self")
+        TRACE_EJECT && println("      [EJECT] FAIL: trying to eject self")
         state.registers[8] = HUH
         return state
     end
 
     # Check if service exists
     if !haskey(im.accounts, eject_id)
-        println("      [EJECT] FAIL: service doesn't exist in accounts=$(keys(im.accounts))")
+        TRACE_EJECT && println("      [EJECT] FAIL: service doesn't exist in accounts=$(keys(im.accounts))")
         state.registers[8] = WHO
         return state
     end
@@ -2220,17 +2399,17 @@ function host_call_eject(state, context)
     target_account = im.accounts[eject_id]
 
     # Check if service's parent matches caller (encoded as parent field)
-    println("      [EJECT] target.parent=$(target_account.parent), caller=$(context.service_id)")
+    TRACE_EJECT && println("      [EJECT] target.parent=$(target_account.parent), caller=$(context.service_id)")
     if target_account.parent != context.service_id
-        println("      [EJECT] FAIL: parent mismatch")
+        TRACE_EJECT && println("      [EJECT] FAIL: parent mismatch")
         state.registers[8] = HUH
         return state
     end
 
     # Check if service has exactly 2 items (code request + one other)
-    println("      [EJECT] target.items=$(target_account.items)")
+    TRACE_EJECT && println("      [EJECT] target.items=$(target_account.items)")
     if target_account.items != 2
-        println("      [EJECT] FAIL: items != 2")
+        TRACE_EJECT && println("      [EJECT] FAIL: items != 2")
         state.registers[8] = HUH
         return state
     end
@@ -2240,21 +2419,21 @@ function host_call_eject(state, context)
     # Full spec would be 19200
     expunge_period = UInt32(32)  # Cexpungeperiod - tiny chainspec
 
-    println("      [EJECT] hash from memory: $(bytes2hex(hash))")
-    println("      [EJECT] target has $(length(target_account.requests)) requests")
+    TRACE_EJECT && println("      [EJECT] hash from memory: $(bytes2hex(hash))")
+    TRACE_EJECT && println("      [EJECT] target has $(length(target_account.requests)) requests")
 
     found_valid_request = false
     for ((req_hash, req_length), req) in target_account.requests
-        println("      [EJECT] checking request: hash=$(bytes2hex(req_hash)), state=$(req.state)")
+        TRACE_EJECT && println("      [EJECT] checking request: hash=$(bytes2hex(req_hash)), state=$(req.state)")
         # Skip code request (hash matches code_hash)
         if req_hash == target_account.code_hash
-            println("      [EJECT]   -> skipping (code request)")
+            TRACE_EJECT && println("      [EJECT]   -> skipping (code request)")
             continue
         end
 
         # Check if this is the request being ejected
         if req_hash == hash
-            println("      [EJECT]   -> hash matches!")
+            TRACE_EJECT && println("      [EJECT]   -> hash matches!")
             # Must be in [x, y] or [x, y, z] state where y < current_time - expunge_period
             # State meanings per graypaper:
             # [] = requested, [x] = acknowledged, [x, y] = available, [x, y, z] = expungeable
@@ -2266,22 +2445,22 @@ function host_call_eject(state, context)
                 else
                     UInt32(0)
                 end
-                println("      [EJECT]   y=$y, threshold=$expunge_threshold, current_time=$(im.current_time)")
+                TRACE_EJECT && println("      [EJECT]   y=$y, threshold=$expunge_threshold, current_time=$(im.current_time)")
                 if y < expunge_threshold
                     found_valid_request = true
-                    println("      [EJECT]   -> request is expired, valid for ejection!")
+                    TRACE_EJECT && println("      [EJECT]   -> request is expired, valid for ejection!")
                     break
                 else
-                    println("      [EJECT]   -> request NOT expired")
+                    TRACE_EJECT && println("      [EJECT]   -> request NOT expired")
                 end
             else
-                println("      [EJECT]   -> state length $(length(req.state)) < 2")
+                TRACE_EJECT && println("      [EJECT]   -> state length $(length(req.state)) < 2")
             end
         end
     end
 
     if !found_valid_request
-        println("      [EJECT] FAIL: no valid request found")
+        TRACE_EJECT && println("      [EJECT] FAIL: no valid request found")
         state.registers[8] = HUH
         return state
     end
