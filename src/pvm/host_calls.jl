@@ -67,6 +67,63 @@ const PROVIDE = 26
 # JIP-1: Debug log host call (available in all contexts)
 const LOG = 100
 
+# ===== Pluggable Host Call Extensions =====
+# Allows registering custom host call handlers for non-standard environments
+# (e.g., CoreVM for Doom, custom testing frameworks, etc.)
+
+"""
+    HostCallExtension
+
+Abstract type for host call extensions. Implement subtypes to add custom host calls.
+"""
+abstract type HostCallExtension end
+
+"""
+    handle_host_call(ext::HostCallExtension, call_id::Int, state, context) -> (handled::Bool, state)
+
+Handle a host call. Returns (true, updated_state) if handled, (false, state) otherwise.
+The extension is responsible for updating registers, gas, and status as needed.
+"""
+function handle_host_call(ext::HostCallExtension, call_id::Int, state, context)
+    return (false, state)  # Default: not handled
+end
+
+# Global registry of host call extensions
+const _host_call_extensions = Vector{HostCallExtension}()
+
+"""
+    register_host_call_extension!(ext::HostCallExtension)
+
+Register a host call extension. Extensions are checked in order of registration.
+"""
+function register_host_call_extension!(ext::HostCallExtension)
+    push!(_host_call_extensions, ext)
+end
+
+"""
+    clear_host_call_extensions!()
+
+Clear all registered host call extensions.
+"""
+function clear_host_call_extensions!()
+    empty!(_host_call_extensions)
+end
+
+"""
+    try_extension_host_calls(call_id::Int, state, context) -> (handled::Bool, state)
+
+Try to handle a host call via registered extensions.
+"""
+function try_extension_host_calls(call_id::Int, state, context)
+    for ext in _host_call_extensions
+        handled, new_state = handle_host_call(ext, call_id, state, context)
+        if handled
+            return (true, new_state)
+        end
+    end
+    return (false, state)
+end
+
 # JIP-1: Log levels
 const LOG_LEVEL_FATAL = 0    # ⛔️ Fatal error
 const LOG_LEVEL_WARN = 1     # ⚠️ Warning
@@ -298,6 +355,12 @@ Arguments:
 Returns: Updated state
 """
 function dispatch_host_call(call_id::Int, state, context, invocation_type::Symbol)
+    # First, try registered extensions (for CoreVM, testing, etc.)
+    handled, new_state = try_extension_host_calls(call_id, state, context)
+    if handled
+        return new_state
+    end
+
     # All host calls cost at least 10 gas (base cost)
     # Additional costs may be added by specific functions
 
@@ -2865,5 +2928,7 @@ end
 # Export public types and functions
 export dispatch_host_call, HostCallContext, ServiceAccount
 export OK, NONE, WHAT, OOB, WHO, FULL, CORE, CASH, LOW, HUH
+# Host call extensions
+export HostCallExtension, handle_host_call, register_host_call_extension!, clear_host_call_extensions!
 
 end

@@ -113,6 +113,41 @@ function MockChainState()
     )
 end
 
+"""
+    register_block!(chain_state, header_hash, slot, parent_hash, parent_slot)
+
+Register a block in the chain state for parent lookup.
+"""
+function register_block!(
+    chain_state::MockChainState,
+    header_hash::Vector{UInt8},
+    slot::UInt64,
+    parent_hash::Vector{UInt8},
+    parent_slot::UInt64
+)
+    chain_state.blocks[header_hash] = Dict{String, Any}(
+        "slot" => slot,
+        "parent_hash" => parent_hash,
+        "parent_slot" => parent_slot
+    )
+end
+
+"""
+    update_chain_state!(chain_state, best_hash, best_slot, finalized_hash, finalized_slot)
+
+Update best and finalized block in chain state.
+"""
+function update_chain_state!(
+    chain_state::MockChainState,
+    best_hash::Vector{UInt8},
+    best_slot::UInt64,
+    finalized_hash::Vector{UInt8},
+    finalized_slot::UInt64
+)
+    chain_state.best_block = BlockDescriptor(best_hash, best_slot)
+    chain_state.finalized_block = BlockDescriptor(finalized_hash, finalized_slot)
+end
+
 function default_parameters()::Dict{String, Any}
     Dict{String, Any}(
         "V1" => Dict{String, Any}(
@@ -255,7 +290,25 @@ end
 function rpc_parent(server::RPCServer, params::Vector{Any})
     length(params) < 1 && throw(RPCError(ERR_INVALID_PARAMS, "Missing header_hash parameter", nothing))
     header_hash = base64decode(params[1])
-    # TODO: Implement block lookup
+
+    # Look up block in chain state
+    if haskey(server.chain_state.blocks, header_hash)
+        block_info = server.chain_state.blocks[header_hash]
+        parent_hash = get(block_info, "parent_hash", nothing)
+        parent_slot = get(block_info, "parent_slot", nothing)
+
+        if parent_hash !== nothing && parent_slot !== nothing
+            return block_descriptor_to_json(BlockDescriptor(parent_hash, UInt64(parent_slot)))
+        end
+    end
+
+    # For genesis block (slot 0), there's no parent - return null
+    # Check if this is the genesis block
+    if header_hash == server.chain_state.finalized_block.header_hash &&
+       server.chain_state.finalized_block.slot == 0
+        return nothing  # Genesis has no parent
+    end
+
     throw(RPCError(ERR_BLOCK_UNAVAILABLE, "Block not found", base64encode(header_hash)))
 end
 
@@ -328,8 +381,9 @@ end
 
 function rpc_work_package_status(server::RPCServer, params::Vector{Any})
     length(params) < 3 && throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters", nothing))
-    # TODO: Implement status lookup
-    return Dict{String, Any}("Failed" => "Not implemented")
+    # Return "Unknown" for work packages we haven't seen
+    # serde enum format: single-key map with null value for unit variant
+    return Dict{String, Any}("Unknown" => nothing)
 end
 
 function rpc_fetch_wp_segments(server::RPCServer, params::Vector{Any})
@@ -364,7 +418,10 @@ function rpc_subscribe_best_block(server::RPCServer, params::Vector{Any})
 end
 
 function rpc_subscribe_finalized_block(server::RPCServer, params::Vector{Any})
-    return 1
+    # Generate a subscription ID
+    sub_id = rand(Int64) & 0x7FFFFFFFFFFFFFFF  # Positive int64
+    # Mark that this subscription needs a notification to be sent
+    return (sub_id, :finalized_block_notification)
 end
 
 function rpc_subscribe_statistics(server::RPCServer, params::Vector{Any})
@@ -384,7 +441,11 @@ function rpc_subscribe_wp_status(server::RPCServer, params::Vector{Any})
 end
 
 function rpc_subscribe_sync_status(server::RPCServer, params::Vector{Any})
-    return 1
+    # Generate a subscription ID (use a large random number like polkajam does)
+    sub_id = rand(Int64) & 0x7FFFFFFFFFFFFFFF  # Positive int64
+    # Mark that this subscription needs a notification to be sent
+    # We'll handle the notification in handle_websocket_message
+    return (sub_id, :sync_status_notification)
 end
 
 function rpc_unsubscribe(server::RPCServer, params::Vector{Any})
@@ -402,6 +463,9 @@ function process_request(server::RPCServer, request, client_id::UInt64)::Dict{St
     method = get(req, "method", nothing)
     params = get(req, "params", Any[])
 
+    # DEBUG: Log all incoming requests
+    @info "RPC REQUEST" method=method id=id params_count=length(params isa Vector ? params : [])
+
     # Validate request
     if isnothing(method)
         return make_error_response(id, ERR_INVALID_REQUEST, "Missing method")
@@ -418,7 +482,10 @@ function process_request(server::RPCServer, request, client_id::UInt64)::Dict{St
 
     try
         result = server.handlers[method](server, params)
-        return make_success_response(id, result)
+        response = make_success_response(id, result)
+        # DEBUG: Log response for tracking
+        @info "RPC RESPONSE" method=method id=id result_type=typeof(result) result_json=JSON.json(response)
+        return response
     catch e
         if isa(e, RPCError)
             return make_error_response(id, e.code, e.message, e.data)
@@ -454,24 +521,60 @@ end
 
 # ===== WebSocket Handling =====
 
-function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client_id::UInt64)::Vector{UInt8}
+function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client_id::UInt64)::Vector{Vector{UInt8}}
     try
         request = JSON.parse(String(data))
 
         # Handle batch requests
         if isa(request, AbstractVector)
             responses = [process_request(server, req, client_id) for req in request]
-            return Vector{UInt8}(JSON.json(responses))
+            return [Vector{UInt8}(JSON.json(responses))]
         else
             response = process_request(server, request, client_id)
-            return Vector{UInt8}(JSON.json(response))
+            frames = [Vector{UInt8}(JSON.json(response))]
+
+            # Check if result needs a follow-up notification
+            if haskey(response, "result") && isa(response["result"], Tuple)
+                sub_id, notification_type = response["result"]
+                # Fix the response to only contain the subscription ID
+                response["result"] = sub_id
+                frames[1] = Vector{UInt8}(JSON.json(response))
+
+                # Add notification frame based on type
+                if notification_type == :sync_status_notification
+                    # Format matches polkajam: {"jsonrpc":"2.0","method":"subscribeSyncStatus","params":{"subscription":ID,"result":"Completed"}}
+                    notification = Dict{String, Any}(
+                        "jsonrpc" => "2.0",
+                        "method" => "subscribeSyncStatus",
+                        "params" => Dict{String, Any}(
+                            "subscription" => sub_id,
+                            "result" => "Completed"
+                        )
+                    )
+                    push!(frames, Vector{UInt8}(JSON.json(notification)))
+                elseif notification_type == :finalized_block_notification
+                    # Send finalized block notification with the current finalized block
+                    finalized = server.chain_state.finalized_block
+                    notification = Dict{String, Any}(
+                        "jsonrpc" => "2.0",
+                        "method" => "subscribeFinalizedBlock",
+                        "params" => Dict{String, Any}(
+                            "subscription" => sub_id,
+                            "result" => block_descriptor_to_json(finalized)
+                        )
+                    )
+                    push!(frames, Vector{UInt8}(JSON.json(notification)))
+                end
+            end
+
+            return frames
         end
     catch e
         # Handle JSON parse errors (ArgumentError in newer JSON.jl)
         if isa(e, ArgumentError) || contains(string(typeof(e)), "Parser")
-            return Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_PARSE, "Parse error")))
+            return [Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_PARSE, "Parse error")))]
         end
-        return Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_INTERNAL, string(e))))
+        return [Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_INTERNAL, string(e))))]
     end
 end
 
@@ -554,8 +657,11 @@ Sec-WebSocket-Accept: $accept_key\r
             frame = read_websocket_frame(client)
             isnothing(frame) && break
 
-            response = handle_websocket_message(server, frame, client_id)
-            write_websocket_frame(client, response)
+            responses = handle_websocket_message(server, frame, client_id)
+            # Send all response frames (supports subscription notifications)
+            for response in responses
+                write_websocket_frame(client, response)
+            end
         catch e
             isa(e, EOFError) && break
             println("WebSocket error: $e")
