@@ -1,9 +1,9 @@
 using Test
 
-println("Running JAMit Complete Test Suite...")
+println("Running romio Complete Test Suite...")
 println("=" ^ 70)
 
-@testset "JAMit Complete Test Suite" begin
+@testset "romio Complete Test Suite" begin
     @testset "Core Functionality Tests" begin
         @testset "Hashing Tests" begin
             include("test_hash.jl")

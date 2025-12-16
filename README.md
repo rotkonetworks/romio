@@ -1,4 +1,4 @@
-# jamit
+# romio
 
-jamit is incomplete jam implementation in more readable format what graypaper
+romio is incomplete jam implementation in more readable format what graypaper
 provides.

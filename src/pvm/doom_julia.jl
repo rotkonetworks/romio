@@ -151,7 +151,7 @@ state = PVM.PVMState(
 )
 
 println("Starting mpv...")
-player = open(`mpv --no-cache --demuxer=rawvideo --demuxer-rawvideo-w=$(WIDTH) --demuxer-rawvideo-h=$(HEIGHT) --demuxer-rawvideo-mp-format=rgb24 --demuxer-rawvideo-fps=35 --title="JAMit Doom (Julia PVM)" -`, "w")
+player = open(`mpv --no-cache --demuxer=rawvideo --demuxer-rawvideo-w=$(WIDTH) --demuxer-rawvideo-h=$(HEIGHT) --demuxer-rawvideo-mp-format=rgb24 --demuxer-rawvideo-fps=35 --title="romio Doom (Julia PVM)" -`, "w")
 
 # Pre-allocate RGB frame buffer
 rgb_frame = Vector{UInt8}(undef, FRAME_SIZE)

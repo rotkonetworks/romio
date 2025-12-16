@@ -8,8 +8,8 @@ text/
 specs/
 
 # Build artifacts
-build/jamit/
-build/jamit_sysimage.so
+build/romio/
+build/romio_sysimage.so
 build/*.so
 
 # Rust build artifacts

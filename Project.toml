@@ -1,7 +1,7 @@
 name = "JAM"
 uuid = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 version = "0.1.0"
-authors = ["jamit@rotko.net"]
+authors = ["hq@rotko.net"]
 
 [deps]
 ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"

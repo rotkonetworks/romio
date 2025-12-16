@@ -65,7 +65,7 @@ Base.@ccallable function julia_main()::Cint
         end
 
         # Include and run the CLI
-        include(joinpath(project_dir, "bin", "jamit"))
+        include(joinpath(project_dir, "bin", "romio"))
         return 0
     catch e
         if e isa InterruptException

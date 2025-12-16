@@ -1,4 +1,4 @@
-# main entry point for JAMit
+# main entry point for romio
 
 # include all required modules
 include("types/basic.jl")

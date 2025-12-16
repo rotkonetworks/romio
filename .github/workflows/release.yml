@@ -80,15 +80,15 @@ jobs:
 
       - name: Prepare artifact
         run: |
-          # The binary is at build/jamit/bin/jamit
-          chmod +x build/jamit/bin/jamit
-          cp build/jamit/bin/jamit jamit-${{ env.TARGET }}
+          # The binary is at build/romio/bin/romio
+          chmod +x build/romio/bin/romio
+          cp build/romio/bin/romio romio-${{ env.TARGET }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jamit-${{ env.TARGET }}
-          path: jamit-${{ env.TARGET }}
+          name: romio-${{ env.TARGET }}
+          path: romio-${{ env.TARGET }}
 
   release:
     needs: build
@@ -123,12 +123,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          name: JAMit ${{ steps.version.outputs.version }}
+          name: romio ${{ steps.version.outputs.version }}
           draft: false
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           files: release/*
           body: |
-            ## JAMit ${{ steps.version.outputs.version }}
+            ## romio ${{ steps.version.outputs.version }}
 
             JAM Protocol implementation in Julia.
 
@@ -136,15 +136,15 @@ jobs:
 
             | Platform | Binary |
             |----------|--------|
-            | Linux x86_64 | `jamit-linux-x86_64` |
-            | Linux aarch64 | `jamit-linux-aarch64` |
-            | macOS x86_64 | `jamit-macos-x86_64` |
-            | macOS aarch64 | `jamit-macos-aarch64` |
+            | Linux x86_64 | `romio-linux-x86_64` |
+            | Linux aarch64 | `romio-linux-aarch64` |
+            | macOS x86_64 | `romio-macos-x86_64` |
+            | macOS aarch64 | `romio-macos-aarch64` |
 
             ### Usage
 
             ```bash
             # Download and make executable
-            chmod +x jamit-linux-x86_64
-            ./jamit-linux-x86_64 --help
+            chmod +x romio-linux-x86_64
+            ./romio-linux-x86_64 --help
             ```

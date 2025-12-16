@@ -186,7 +186,7 @@ function NodeInfo(;
     peer_address_ipv6::Vector{UInt8}=zeros(UInt8, 16),
     peer_address_port::UInt16=UInt16(0),
     node_flags::UInt32=UInt32(0),
-    impl_name::String="JAMit",
+    impl_name::String="romio",
     impl_version::String="0.1.0",
     gp_version::String="0.7.1",
     note::String=""

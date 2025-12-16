@@ -150,7 +150,7 @@ end
 # Create window
 window = ccall((:SDL_CreateWindow, sdl), Ptr{Nothing},
     (Cstring, Cint, Cint, Cint, Cint, UInt32),
-    "JAMit Doom (Julia PVM)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    "romio Doom (Julia PVM)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
     WIDTH * SCALE, HEIGHT * SCALE, SDL_WINDOW_SHOWN)
 
 if window == C_NULL

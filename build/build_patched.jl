@@ -2,9 +2,9 @@ using PackageCompiler
 using Pkg
 
 project_dir = dirname(dirname(@__FILE__))
-build_dir = joinpath(project_dir, "build", "jamit")
+build_dir = joinpath(project_dir, "build", "romio")
 
-println("Building JAMit standalone binary...")
+println("Building romio standalone binary...")
 println("Project directory: $project_dir")
 println("Build directory: $build_dir")
 
@@ -12,7 +12,7 @@ println("Build directory: $build_dir")
 rm(build_dir, force=true, recursive=true)
 
 # Use create_sysimage as an intermediate step
-sysimage_path = joinpath(project_dir, "build", "jamit_sysimage.so")
+sysimage_path = joinpath(project_dir, "build", "romio_sysimage.so")
 
 println("Creating sysimage...")
 create_sysimage(

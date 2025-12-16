@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 #
-# JAMit - JAM Protocol Implementation in Julia
+# romio - JAM Protocol Implementation in Julia
 # CLI structure matching polkajam
 #
 
@@ -195,7 +195,7 @@ end
 
 # ===== CLI Parser =====
 function parse_commandline()
-    s = ArgParseSettings(prog="jamit", description="JAMit - JAM Protocol Implementation in Julia",
+    s = ArgParseSettings(prog="romio", description="romio - JAM Protocol Implementation in Julia",
         version=VERSION, add_version=true, commands_are_required=true)
 
     # Global options
@@ -243,7 +243,7 @@ function parse_commandline()
     # run command
     @add_arg_table! s begin
         "run"
-            help = "Run a JAMit node"
+            help = "Run a romio node"
             action = :command
     end
 
@@ -406,7 +406,7 @@ end
 
 function cmd_run(args)
     println("╔═══════════════════════════════════════════════════════════════╗")
-    println("║              JAMit - JAM Validator Node                       ║")
+    println("║              romio - JAM Validator Node                       ║")
     println("╚═══════════════════════════════════════════════════════════════╝\n")
 
     run_args = args["run"]  # Subcommand options
@@ -456,10 +456,10 @@ function cmd_run(args)
             peer_id=identity.keypair.public_key,
             peer_address_ipv6=Telemetry.localhost_ipv6(),
             peer_address_port=UInt16(port),
-            impl_name="JAMit",
+            impl_name="romio",
             impl_version=VERSION,
             gp_version="0.5.5",
-            note="JAM Protocol Implementation in Julia"
+            note="JAM protocol implementation in julia"
         )
         telemetry_client = Telemetry.from_cli(telemetry_endpoint; node_info=node_info)
         !isnothing(telemetry_client) && Telemetry.connect!(telemetry_client)
@@ -532,7 +532,7 @@ end
 
 function cmd_testnet(args)
     println("╔═══════════════════════════════════════════════════════════════╗")
-    println("║              JAMit - Local Testnet                            ║")
+    println("║              romio - Local Testnet                            ║")
     println("╚═══════════════════════════════════════════════════════════════╝\n")
 
     num_validators = args["num-validators"]
@@ -577,10 +577,10 @@ function cmd_testnet(args)
             peer_id=first_identity.keypair.public_key,
             peer_address_ipv6=Telemetry.localhost_ipv6(),
             peer_address_port=UInt16(base_port),
-            impl_name="JAMit",
+            impl_name="romio",
             impl_version=VERSION,
             gp_version="0.5.5",
-            note="JAMit Testnet ($num_validators validators)"
+            note="romio testnet ($num_validators validators)"
         )
         telemetry_client = Telemetry.from_cli(telemetry_endpoint; node_info=node_info)
         if !isnothing(telemetry_client)
