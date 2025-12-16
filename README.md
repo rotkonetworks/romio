@@ -26,24 +26,18 @@ JAM (Join Accumulate Machine) implementation in Julia.
 ## Build
 
 ```bash
-# Build bandersnatch FFI
-cd deps/bandersnatch-ffi && cargo build --release && cd ../..
-
-# Run tests
-julia --project=. -e 'using Pkg; Pkg.test()'
-
-# Build standalone binary
-julia --project=. build/build_app.jl
+make        # builds deps + sysimage
+make test   # run tests
 ```
 
 ## Run
 
 ```bash
-# Start node
-julia --project=. -e 'using JAM; JAM.main()' -- --help
+make run ARGS="--help"
+make run ARGS="run --chain dev"
 
-# Run STF tests
-julia --project=. test/stf_test.jl
+# or directly:
+julia -J build/romio.so --project=. bin/romio --help
 ```
 
 ## Structure
