@@ -34,10 +34,12 @@ pub struct PvmResult {
     pub host_call: u32,
 }
 
-/// Create a new PolkaVM engine with default configuration
+/// Create a new PolkaVM engine with JIT backend (default for max performance)
 #[no_mangle]
 pub extern "C" fn pvm_engine_new() -> *mut PvmEngine {
-    let config = Config::from_env().unwrap_or_default();
+    // Always use JIT/Compiler backend for best performance
+    let mut config = Config::new();
+    config.set_backend(Some(polkavm::BackendKind::Compiler));
     match Engine::new(&config) {
         Ok(engine) => Box::into_raw(Box::new(PvmEngine { engine })),
         Err(_) => std::ptr::null_mut(),
@@ -464,4 +466,53 @@ pub extern "C" fn pvm_module_export_pc(module: *const PvmModule, index: u32) -> 
     } else {
         0
     }
+}
+
+/// Read framebuffer from instance and convert indexed color to RGB24
+/// Doom format: 1 byte header + 768 byte palette (256*3 RGB) + 64000 indexed pixels
+/// Returns 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn pvm_instance_read_framebuffer_rgb24(
+    instance: *const PvmInstance,
+    fb_address: u32,
+    fb_size: u32,
+    rgb_buffer: *mut u8,
+    rgb_buffer_len: u32,
+) -> i32 {
+    if instance.is_null() || rgb_buffer.is_null() {
+        return -1;
+    }
+
+    // Expected Doom framebuffer: 1 + 768 + 64000 = 64769 bytes minimum
+    if fb_size < 64769 || rgb_buffer_len < 64000 * 3 {
+        return -1;
+    }
+
+    let instance = unsafe { &(*instance).instance };
+    let rgb_out = unsafe { slice::from_raw_parts_mut(rgb_buffer, rgb_buffer_len as usize) };
+
+    // Read palette (768 bytes at offset 1)
+    let mut palette = [0u8; 768];
+    if instance.read_memory_into(fb_address + 1, &mut palette).is_err() {
+        return -1;
+    }
+
+    // Read indexed pixels (64000 bytes at offset 769)
+    let mut pixels = [0u8; 64000];
+    if instance.read_memory_into(fb_address + 769, &mut pixels).is_err() {
+        return -1;
+    }
+
+    // Convert indexed to RGB24 - this is the hot loop, now in Rust
+    for (i, &idx) in pixels.iter().enumerate() {
+        let palette_offset = (idx as usize) * 3;
+        let rgb_offset = i * 3;
+        if palette_offset + 2 < 768 && rgb_offset + 2 < rgb_out.len() {
+            rgb_out[rgb_offset] = palette[palette_offset];
+            rgb_out[rgb_offset + 1] = palette[palette_offset + 1];
+            rgb_out[rgb_offset + 2] = palette[palette_offset + 2];
+        }
+    }
+
+    0
 }

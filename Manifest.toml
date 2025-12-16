@@ -287,7 +287,7 @@ uuid = "82899510-4779-5014-852e-03e436cf321d"
 version = "1.0.0"
 
 [[deps.JAM]]
-deps = ["ArgParse", "BatchedMerkleTree", "BinaryFields", "BinaryReedSolomon", "BitIntegers", "Comonicon", "DataStructures", "JSON", "Keccak", "PackageCompiler", "PrecompileTools", "Quic", "SDL2_jll", "SHA", "SimpleDirectMediaLayer", "Sockets", "StaticArrays", "StructArrays", "TOML"]
+deps = ["ArgParse", "BatchedMerkleTree", "BinaryFields", "BinaryReedSolomon", "BitIntegers", "Comonicon", "DataStructures", "JSON", "Keccak", "PrecompileTools", "Quic", "SDL2_jll", "SHA", "SimpleDirectMediaLayer", "Sockets", "StaticArrays", "StructArrays", "TOML"]
 path = "."
 uuid = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 version = "0.1.0"

@@ -187,6 +187,14 @@ function module_export_pc(mod::PvmModulePtr, index::UInt32)::UInt32
           (PvmModulePtr, UInt32), mod, index)
 end
 
+"""Read framebuffer and convert indexed color to RGB24 in one FFI call (optimized for Doom)"""
+function instance_read_framebuffer_rgb24(instance::PvmInstancePtr, fb_addr::UInt32, fb_size::UInt32, rgb_buffer::Vector{UInt8})::Bool
+    result = ccall(dlsym(LIBPOLKAVM, :pvm_instance_read_framebuffer_rgb24), Int32,
+                   (PvmInstancePtr, UInt32, UInt32, Ptr{UInt8}, UInt32),
+                   instance, fb_addr, fb_size, rgb_buffer, UInt32(length(rgb_buffer)))
+    result == 0
+end
+
 # Register names (matching our PVM convention)
 const REG_RA = UInt32(0)
 const REG_SP = UInt32(1)
@@ -279,6 +287,10 @@ sbrk!(inst::PvmInstance, pages::UInt32) = instance_sbrk(inst.ptr, pages)
 heap_size(inst::PvmInstance) = instance_heap_size(inst.ptr)
 prepare_call!(inst::PvmInstance, pc::UInt32) = instance_prepare_call(inst.ptr, pc)
 
+"""Read Doom framebuffer and convert indexed to RGB24 in one optimized FFI call"""
+read_framebuffer_rgb24!(inst::PvmInstance, fb_addr::UInt32, fb_size::UInt32, rgb_buffer::Vector{UInt8}) =
+    instance_read_framebuffer_rgb24(inst.ptr, fb_addr, fb_size, rgb_buffer)
+
 export PvmEngine, PvmModule, PvmInstance, PvmResult, PvmMemoryInfo
 export HALT, PANIC, OOG, FAULT, HOST
 export REG_RA, REG_SP, REG_T0, REG_T1, REG_T2, REG_S0, REG_S1
@@ -286,5 +298,6 @@ export REG_A0, REG_A1, REG_A2, REG_A3, REG_A4, REG_A5
 export set_gas!, get_gas, set_reg!, get_reg, read_memory, write_memory!
 export run!, get_pc, reset!, sbrk!, heap_size, memory_info
 export prepare_call!, exports_count, export_name, export_pc
+export read_framebuffer_rgb24!
 
 end # module
