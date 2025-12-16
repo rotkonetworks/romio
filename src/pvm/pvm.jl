@@ -23,212 +23,274 @@ const DYNAM_ALIGN = 2  # dynamic address alignment
     return (addr + page_mask) & ~page_mask
 end
 
-# exit reasons
-const CONTINUE = :continue
-const HALT = :halt
-const PANIC = :panic
-const OOG = :oog
-const FAULT = :fault
-const HOST = :host
+# exit reasons - using UInt8 for fast comparison
+const CONTINUE = UInt8(0)
+const HALT = UInt8(1)
+const PANIC = UInt8(2)
+const OOG = UInt8(3)
+const FAULT = UInt8(4)
+const HOST = UInt8(5)
+
+# Status type alias for documentation
+const Status = UInt8
 
 # memory access permissions
 const READ = :R
 const WRITE = :W
 const NONE = nothing
 
-# Cache-optimized sparse memory with two-level page table
-# Level 1: 1024 entries (covers 4GB with 4MB L1 entries)
-# Level 2: 1024 pages per L1 entry (4KB pages)
-# Total: 1M pages = 4GB address space
-const L1_BITS = 10  # 1024 L1 entries
-const L2_BITS = 10  # 1024 L2 entries per L1
+# Flat memory design for fast access - uses contiguous arrays for known regions
+# PolkaVM memory layout:
+#   0x00000000 - 0x0000FFFF: Inaccessible (first 64KB)
+#   0x00010000 - RO region: Read-only data
+#   RW region: Read-write data
+#   Stack region near 0xFFFE0000: Stack (grows down)
+#   Heap: Dynamic (via sbrk)
+
 const PAGE_BITS = 12  # 4KB pages (must match PAGE_SIZE = 4096)
-const L1_SIZE = 1 << L1_BITS
-const L2_SIZE = 1 << L2_BITS
 const PAGE_MASK = UInt32((1 << PAGE_BITS) - 1)
-const L2_MASK = UInt32((1 << L2_BITS) - 1)
 
-struct SparseMemoryData
-    # Two-level page table: L1[l1_idx] -> L2 array -> page data
-    l1::Vector{Union{Nothing, Vector{Union{Nothing, Vector{UInt8}}}}}
-    # Hot path cache: avoid L1/L2 lookup for repeated accesses to same page
-    cached_page_num::Base.RefValue{UInt32}
-    cached_page::Base.RefValue{Union{Nothing, Vector{UInt8}}}
+# Memory region with flat array storage
+# Uses concrete types only - no Union{Nothing, T} to avoid boxing
+struct FlatRegion
+    base::UInt32           # Start address (0 = disabled)
+    limit::UInt32          # End address (exclusive) - avoids addition in hot path
+    data::Vector{UInt8}    # Flat array - direct indexing!
+    writable::Bool         # RO vs RW
 end
 
-function SparseMemoryData()
-    l1 = Vector{Union{Nothing, Vector{Union{Nothing, Vector{UInt8}}}}}(nothing, L1_SIZE)
-    SparseMemoryData(l1, Ref(UInt32(0xFFFFFFFF)), Ref{Union{Nothing, Vector{UInt8}}}(nothing))
+# Empty sentinel region (never matches any address > 0)
+const EMPTY_REGION = FlatRegion(UInt32(0), UInt32(0), UInt8[], false)
+
+function FlatRegion(base::UInt32, size::UInt32, writable::Bool)
+    FlatRegion(base, base + size, zeros(UInt8, size), writable)
 end
 
-# Fast page lookup with single-page cache
-@inline function get_page(m::SparseMemoryData, page_num::UInt32)::Union{Nothing, Vector{UInt8}}
-    # Check cache first (hot path - same page as last access)
-    if page_num == m.cached_page_num[]
-        return m.cached_page[]
-    end
-
-    # Two-level lookup using bit operations (no div/mod)
-    l1_idx = (page_num >> L2_BITS) + 1  # 1-indexed
-    l2_idx = (page_num & L2_MASK) + 1   # 1-indexed
-
-    @inbounds begin
-        l2 = m.l1[l1_idx]
-        if l2 === nothing
-            return nothing
-        end
-        page = l2[l2_idx]
-        # Update cache
-        m.cached_page_num[] = page_num
-        m.cached_page[] = page
-        return page
-    end
+# Check if address is in this region - single comparison using precomputed limit
+@inline function in_region(r::FlatRegion, addr::UInt32)::Bool
+    addr >= r.base && addr < r.limit
 end
 
-@inline function get_or_create_page!(m::SparseMemoryData, page_num::UInt32)::Vector{UInt8}
-    l1_idx = (page_num >> L2_BITS) + 1
-    l2_idx = (page_num & L2_MASK) + 1
+# Get byte from region (addr is absolute address)
+@inline function region_read(r::FlatRegion, addr::UInt32)::UInt8
+    @inbounds r.data[addr - r.base + 1]
+end
 
-    @inbounds begin
-        l2 = m.l1[l1_idx]
-        if l2 === nothing
-            l2 = Vector{Union{Nothing, Vector{UInt8}}}(nothing, L2_SIZE)
-            m.l1[l1_idx] = l2
-        end
+# Set byte in region (addr is absolute address)
+@inline function region_write!(r::FlatRegion, addr::UInt32, val::UInt8)
+    @inbounds r.data[addr - r.base + 1] = val
+end
 
-        page = l2[l2_idx]
-        if page === nothing
-            page = zeros(UInt8, PAGE_SIZE)
-            l2[l2_idx] = page
-        end
+# Sparse fallback for dynamic heap allocations
+struct SparseMemory
+    pages::Dict{UInt32, Vector{UInt8}}
+    page_perms::Dict{UInt32, Bool}  # true = writable, false = readonly
+end
 
-        # Update cache
-        m.cached_page_num[] = page_num
-        m.cached_page[] = page
-        return page
+SparseMemory() = SparseMemory(Dict{UInt32, Vector{UInt8}}(), Dict{UInt32, Bool}())
+
+mutable struct Memory
+    # Fast path: flat regions for known areas (stack/RO/RW)
+    # Uses concrete FlatRegion type (no Union) - EMPTY_REGION as sentinel
+    ro_region::FlatRegion
+    rw_region::FlatRegion
+    stack_region::FlatRegion
+
+    # Slow path: sparse storage for heap and other dynamic areas
+    sparse::SparseMemory
+
+    # Heap management
+    current_heap_pointer::UInt32
+    heap_base::UInt32
+    heap_limit::UInt32  # Max heap address before hitting stack
+
+    function Memory()
+        new(EMPTY_REGION, EMPTY_REGION, EMPTY_REGION, SparseMemory(), UInt32(0), UInt32(0), UInt32(0))
     end
 end
 
-# 1-indexed access (Julia convention) - addr is 1-based
-@inline function Base.getindex(m::SparseMemoryData, addr::Integer)::UInt8
-    addr0 = UInt32(addr - 1)
-    page_num = addr0 >> PAGE_BITS  # Fast bit shift instead of div
-    offset = (addr0 & PAGE_MASK) + 1  # 1-indexed into page
+# Initialize memory regions from program layout
+function init_memory_regions!(mem::Memory, ro_base::UInt32, ro_size::UInt32, ro_data::Vector{UInt8},
+                              rw_base::UInt32, rw_size::UInt32, rw_data::Vector{UInt8},
+                              stack_low::UInt32, stack_high::UInt32,
+                              heap_base::UInt32, heap_limit::UInt32)
+    # RO region
+    if ro_size > 0
+        mem.ro_region = FlatRegion(ro_base, ro_size, false)
+        for (i, b) in enumerate(ro_data)
+            mem.ro_region.data[i] = b
+        end
+    end
 
-    page = get_page(m, page_num)
+    # RW region (includes BSS - already zeroed)
+    if rw_size > 0
+        mem.rw_region = FlatRegion(rw_base, rw_size, true)
+        for (i, b) in enumerate(rw_data)
+            mem.rw_region.data[i] = b
+        end
+    end
+
+    # Stack region
+    stack_size = stack_high - stack_low
+    if stack_size > 0
+        mem.stack_region = FlatRegion(stack_low, stack_size, true)
+    end
+
+    mem.current_heap_pointer = heap_base
+    mem.heap_base = heap_base
+    mem.heap_limit = heap_limit
+end
+
+# Legacy sparse memory interface (for compatibility with existing code)
+# These are only used for dynamic heap allocations now
+
+@inline function get_sparse_page!(m::SparseMemory, page_num::UInt32)::Vector{UInt8}
+    page = get(m.pages, page_num, nothing)
+    if page === nothing
+        page = zeros(UInt8, PAGE_SIZE)
+        m.pages[page_num] = page
+        m.page_perms[page_num] = true  # Heap pages are writable
+    end
+    return page
+end
+
+@inline function sparse_read(m::SparseMemory, addr::UInt32)::UInt8
+    page_num = addr >> PAGE_BITS
+    offset = (addr & PAGE_MASK) + 1
+    page = get(m.pages, page_num, nothing)
     if page === nothing
         return UInt8(0)
     end
     @inbounds return page[offset]
 end
 
-@inline function Base.setindex!(m::SparseMemoryData, val::UInt8, addr::Integer)
-    addr0 = UInt32(addr - 1)
-    page_num = addr0 >> PAGE_BITS
-    offset = (addr0 & PAGE_MASK) + 1
-
-    page = get_or_create_page!(m, page_num)
+@inline function sparse_write!(m::SparseMemory, addr::UInt32, val::UInt8)
+    page_num = addr >> PAGE_BITS
+    offset = (addr & PAGE_MASK) + 1
+    page = get_sparse_page!(m, page_num)
     @inbounds page[offset] = val
+end
+
+@inline function sparse_has_access(m::SparseMemory, addr::UInt32, write::Bool)::Bool
+    page_num = addr >> PAGE_BITS
+    perm = get(m.page_perms, page_num, nothing)
+    if perm === nothing
+        return false
+    end
+    return !write || perm  # Read always OK if page exists, write only if writable
+end
+
+# Legacy compatibility interface for graypaper setup_memory!
+# This wraps the flat regions with a Dict-like interface for existing code
+
+struct MemoryDataWrapper
+    mem::Memory
+end
+
+@inline function Base.getindex(w::MemoryDataWrapper, addr::Integer)::UInt8
+    addr32 = UInt32(addr - 1)  # Convert 1-indexed to 0-indexed
+    mem = w.mem
+
+    # Check flat regions
+    ro = mem.ro_region
+    if addr32 >= ro.base && addr32 < ro.limit
+        return ro.data[addr32 - ro.base + 1]
+    end
+
+    rw = mem.rw_region
+    if addr32 >= rw.base && addr32 < rw.limit
+        return rw.data[addr32 - rw.base + 1]
+    end
+
+    stack = mem.stack_region
+    if addr32 >= stack.base && addr32 < stack.limit
+        return stack.data[addr32 - stack.base + 1]
+    end
+
+    # Fallback to sparse
+    return sparse_read(mem.sparse, addr32)
+end
+
+@inline function Base.setindex!(w::MemoryDataWrapper, val::UInt8, addr::Integer)
+    addr32 = UInt32(addr - 1)  # Convert 1-indexed to 0-indexed
+    mem = w.mem
+
+    # Check flat regions
+    rw = mem.rw_region
+    if addr32 >= rw.base && addr32 < rw.limit
+        rw.data[addr32 - rw.base + 1] = val
+        return val
+    end
+
+    stack = mem.stack_region
+    if addr32 >= stack.base && addr32 < stack.limit
+        stack.data[addr32 - stack.base + 1] = val
+        return val
+    end
+
+    # Fallback to sparse (heap, input areas, etc.)
+    sparse_write!(mem.sparse, addr32, val)
     return val
 end
 
-# Range-based getindex for slice operations like data[offset+1:offset+length]
-@inline function Base.getindex(m::SparseMemoryData, r::UnitRange{<:Integer})::Vector{UInt8}
-    len = length(r)
-    result = Vector{UInt8}(undef, len)
-    for (i, addr) in enumerate(r)
-        result[i] = m[addr]
-    end
-    return result
+struct MemoryAccessWrapper
+    mem::Memory
 end
 
-# Bulk copy operation for copyto!
-@inline function Base.copyto!(m::SparseMemoryData, dest_offset::Integer, src::Vector{UInt8}, src_offset::Integer, count::Integer)
-    for i in 0:count-1
-        m[dest_offset + i] = src[src_offset + i]
-    end
-    return m
-end
+@inline function Base.getindex(w::MemoryAccessWrapper, page_idx::Integer)::Union{Symbol, Nothing}
+    page_addr = UInt32((page_idx - 1) * PAGE_SIZE)
+    mem = w.mem
 
-# Two-level access permission table (mirrors page table structure)
-struct SparseAccessData
-    l1::Vector{Union{Nothing, Vector{Union{Symbol, Nothing}}}}
-    # Cache last accessed page permission
-    cached_page_idx::Base.RefValue{UInt32}
-    cached_access::Base.RefValue{Union{Symbol, Nothing}}
-end
-
-function SparseAccessData()
-    l1 = Vector{Union{Nothing, Vector{Union{Symbol, Nothing}}}}(nothing, L1_SIZE)
-    SparseAccessData(l1, Ref(UInt32(0xFFFFFFFF)), Ref{Union{Symbol, Nothing}}(nothing))
-end
-
-@inline function Base.getindex(a::SparseAccessData, page_idx::Integer)::Union{Symbol, Nothing}
-    page_idx32 = UInt32(page_idx - 1)  # Convert to 0-based
-
-    # Check cache
-    if page_idx32 == a.cached_page_idx[]
-        return a.cached_access[]
+    # Check flat regions
+    ro = mem.ro_region
+    if page_addr >= ro.base && page_addr < ro.limit
+        return READ
     end
 
-    l1_idx = (page_idx32 >> L2_BITS) + 1
-    l2_idx = (page_idx32 & L2_MASK) + 1
-
-    @inbounds begin
-        l2 = a.l1[l1_idx]
-        if l2 === nothing
-            return nothing
-        end
-        access = l2[l2_idx]
-        # Update cache
-        a.cached_page_idx[] = page_idx32
-        a.cached_access[] = access
-        return access
+    rw = mem.rw_region
+    if page_addr >= rw.base && page_addr < rw.limit
+        return WRITE
     end
+
+    stack = mem.stack_region
+    if page_addr >= stack.base && page_addr < stack.limit
+        return WRITE
+    end
+
+    # Check sparse pages
+    perm = get(mem.sparse.page_perms, UInt32(page_idx - 1), nothing)
+    if perm !== nothing
+        return perm ? WRITE : READ
+    end
+
+    return nothing
 end
 
-@inline function Base.setindex!(a::SparseAccessData, val::Union{Symbol, Nothing}, page_idx::Integer)
-    page_idx32 = UInt32(page_idx - 1)
-    l1_idx = (page_idx32 >> L2_BITS) + 1
-    l2_idx = (page_idx32 & L2_MASK) + 1
-
-    @inbounds begin
-        l2 = a.l1[l1_idx]
-        if l2 === nothing
-            l2 = Vector{Union{Symbol, Nothing}}(nothing, L2_SIZE)
-            a.l1[l1_idx] = l2
-        end
-        l2[l2_idx] = val
-        # Update cache
-        a.cached_page_idx[] = page_idx32
-        a.cached_access[] = val
+@inline function Base.setindex!(w::MemoryAccessWrapper, val::Union{Symbol, Nothing}, page_idx::Integer)
+    # For graypaper setup - store in sparse
+    if val === nothing
+        delete!(w.mem.sparse.page_perms, UInt32(page_idx - 1))
+    else
+        w.mem.sparse.page_perms[UInt32(page_idx - 1)] = (val == WRITE)
     end
     return val
 end
 
-# Compatibility with get() for existing code
-@inline function Base.get(a::SparseAccessData, page_idx::Integer, default)
-    result = a[page_idx]
+@inline function Base.get(w::MemoryAccessWrapper, page_idx::Integer, default)
+    result = w[page_idx]
     return result === nothing ? default : result
 end
 
-# Length returns max addressable pages (for legacy code compatibility)
-# With sparse storage, any page can be allocated
-@inline Base.length(a::SparseAccessData) = L1_SIZE * L2_SIZE  # 1M pages = 4GB
+@inline Base.length(w::MemoryAccessWrapper) = 1048576  # 1M pages = 4GB
 
-# Also add length for SparseMemoryData for consistency
-@inline Base.length(m::SparseMemoryData) = L1_SIZE * L2_SIZE * PAGE_SIZE  # 4GB
-
-mutable struct Memory
-    data::SparseMemoryData
-    access::SparseAccessData  # per-page access with two-level table
-    current_heap_pointer::UInt32  # Current heap top for sbrk
-
-    function Memory()
-        data = SparseMemoryData()
-        access = SparseAccessData()
-        # Heap pointer will be initialized in setup_memory!
-        new(data, access, UInt32(0))
+# Property accessors for Memory to provide legacy interface
+Base.getproperty(m::Memory, s::Symbol) = begin
+    if s === :data
+        return MemoryDataWrapper(m)
+    elseif s === :access
+        return MemoryAccessWrapper(m)
+    else
+        return getfield(m, s)
     end
 end
 
@@ -242,11 +304,12 @@ end
 mutable struct PVMState
     # HOT PATH - Accessed every instruction (L1 cache line ~64 bytes)
     pc::UInt32  # program counter (4 bytes)
-    status::Symbol  # execution status (8 bytes)
+    status::UInt8  # execution status (1 byte) - CONTINUE/HALT/PANIC/OOG/FAULT/HOST
     gas::Int64  # gas remaining (8 bytes)
     instructions::Vector{UInt8}  # instruction bytes (24 bytes ptr+len+cap)
     opcode_mask::BitVector  # marks opcode positions (24 bytes)
-    # = 68 bytes (just over 1 cache line)
+    skip_distances::Vector{UInt8}  # precomputed skip distances for each position
+    # = 92 bytes (~1.5 cache lines)
 
     # FREQUENTLY ACCESSED - Registers and memory (next cache line)
     registers::Vector{UInt64}  # 13 general purpose registers (24 bytes)
@@ -257,6 +320,25 @@ mutable struct PVMState
     host_call_id::UInt32  # temporary storage for host call ID
     exports::Vector{Vector{UInt8}}  # list of exported memory segments
     machines::Dict{UInt32, GuestPVM}  # machine_id => guest PVM
+end
+
+# Precompute skip distances from opcode mask
+function precompute_skip_distances(mask::BitVector)::Vector{UInt8}
+    n = length(mask)
+    distances = zeros(UInt8, n)
+    for i in 1:n
+        if mask[i]  # Only compute for opcode positions
+            for j in 1:min(24, n-i)
+                if mask[i + j]
+                    distances[i] = UInt8(j - 1)
+                    @goto found
+                end
+            end
+            distances[i] = UInt8(min(24, n - i))
+            @label found
+        end
+    end
+    return distances
 end
 
 # Read graypaper varint from bytes
@@ -493,53 +575,160 @@ function skip_distance(mask::BitVector, pos::Int)
 end
 
 # memory access helpers
+# Fast memory access using flat regions - no Dict lookups, no Union types!
 @inline function read_u8(state::PVMState, addr::UInt64)
     @inbounds begin
-        addr32 = UInt32(addr % 2^32)
-        page = div(addr32, PAGE_SIZE)
+        addr32 = UInt32(addr & 0xFFFFFFFF)
+        mem = state.memory
 
-        # check access
-        if addr32 < 2^16  # first 64KB always inaccessible
+        # First 64KB always inaccessible
+        if addr32 < 0x10000
             state.status = PANIC
             return UInt8(0)
         end
 
-        page_idx = page + 1
-        access = get(state.memory.access, page_idx, NONE)
-        if access != READ && access != WRITE
-            state.status = FAULT
-            state.gas -= 1  # Page faults cost 1 additional gas
-            return UInt8(0)
+        # Try RO region first (most common for code constants)
+        # Using precomputed limit avoids addition in hot path
+        ro = mem.ro_region
+        if addr32 >= ro.base && addr32 < ro.limit
+            return ro.data[addr32 - ro.base + 1]
         end
 
-        val = state.memory.data[addr32 + 1]
-        return val
+        # Try RW region (data section)
+        rw = mem.rw_region
+        if addr32 >= rw.base && addr32 < rw.limit
+            return rw.data[addr32 - rw.base + 1]
+        end
+
+        # Try stack region
+        stack = mem.stack_region
+        if addr32 >= stack.base && addr32 < stack.limit
+            return stack.data[addr32 - stack.base + 1]
+        end
+
+        # Fallback to sparse (heap)
+        if addr32 >= mem.heap_base && addr32 < mem.current_heap_pointer
+            return sparse_read(mem.sparse, addr32)
+        end
+
+        # No access
+        state.status = FAULT
+        state.gas -= 1
+        return UInt8(0)
     end
 end
 
 @inline function write_u8(state::PVMState, addr::UInt64, val::UInt8)
     @inbounds begin
-        addr32 = UInt32(addr % 2^32)
-        page = div(addr32, PAGE_SIZE)
+        addr32 = UInt32(addr & 0xFFFFFFFF)
+        mem = state.memory
 
-        # check access
-        if addr32 < 2^16
+        # First 64KB always inaccessible
+        if addr32 < 0x10000
             state.status = PANIC
             return
         end
 
-        page_idx = page + 1
-        if get(state.memory.access, page_idx, NONE) != WRITE
-            state.status = FAULT
-            state.gas -= 1  # Page faults cost 1 additional gas
+        # Try RW region first (most writes go here)
+        rw = mem.rw_region
+        if addr32 >= rw.base && addr32 < rw.limit
+            rw.data[addr32 - rw.base + 1] = val
             return
         end
 
-        state.memory.data[addr32 + 1] = val
+        # Try stack region
+        stack = mem.stack_region
+        if addr32 >= stack.base && addr32 < stack.limit
+            stack.data[addr32 - stack.base + 1] = val
+            return
+        end
+
+        # Fallback to sparse (heap)
+        if addr32 >= mem.heap_base && addr32 < mem.current_heap_pointer
+            sparse_write!(mem.sparse, addr32, val)
+            return
+        end
+
+        # RO region - not writable
+        ro = mem.ro_region
+        if addr32 >= ro.base && addr32 < ro.limit
+            state.status = FAULT
+            state.gas -= 1
+            return
+        end
+
+        # No access
+        state.status = FAULT
+        state.gas -= 1
     end
 end
 
-# Optimized: pre-allocate result vector
+# Optimized: Zero-allocation read for 32-bit values
+@inline function read_u32_fast(state::PVMState, addr::UInt64)::UInt32
+    @inbounds begin
+        b0 = read_u8(state, addr)
+        state.status != CONTINUE && return UInt32(0)
+        b1 = read_u8(state, addr + 1)
+        state.status != CONTINUE && return UInt32(0)
+        b2 = read_u8(state, addr + 2)
+        state.status != CONTINUE && return UInt32(0)
+        b3 = read_u8(state, addr + 3)
+        return UInt32(b0) | (UInt32(b1) << 8) | (UInt32(b2) << 16) | (UInt32(b3) << 24)
+    end
+end
+
+# Optimized: Zero-allocation write for 32-bit values
+@inline function write_u32_fast(state::PVMState, addr::UInt64, val::UInt32)
+    @inbounds begin
+        write_u8(state, addr, UInt8(val & 0xFF))
+        state.status != CONTINUE && return
+        write_u8(state, addr + 1, UInt8((val >> 8) & 0xFF))
+        state.status != CONTINUE && return
+        write_u8(state, addr + 2, UInt8((val >> 16) & 0xFF))
+        state.status != CONTINUE && return
+        write_u8(state, addr + 3, UInt8((val >> 24) & 0xFF))
+    end
+end
+
+# Optimized: Zero-allocation read for 16-bit values
+@inline function read_u16_fast(state::PVMState, addr::UInt64)::UInt16
+    @inbounds begin
+        b0 = read_u8(state, addr)
+        state.status != CONTINUE && return UInt16(0)
+        b1 = read_u8(state, addr + 1)
+        return UInt16(b0) | (UInt16(b1) << 8)
+    end
+end
+
+# Optimized: Zero-allocation write for 16-bit values
+@inline function write_u16_fast(state::PVMState, addr::UInt64, val::UInt16)
+    @inbounds begin
+        write_u8(state, addr, UInt8(val & 0xFF))
+        state.status != CONTINUE && return
+        write_u8(state, addr + 1, UInt8((val >> 8) & 0xFF))
+    end
+end
+
+# Optimized: Zero-allocation read for 64-bit values
+@inline function read_u64_fast(state::PVMState, addr::UInt64)::UInt64
+    @inbounds begin
+        lo = UInt64(read_u32_fast(state, addr))
+        state.status != CONTINUE && return UInt64(0)
+        hi = UInt64(read_u32_fast(state, addr + 4))
+        return lo | (hi << 32)
+    end
+end
+
+# Optimized: Zero-allocation write for 64-bit values
+@inline function write_u64_fast(state::PVMState, addr::UInt64, val::UInt64)
+    @inbounds begin
+        write_u32_fast(state, addr, UInt32(val & 0xFFFFFFFF))
+        state.status != CONTINUE && return
+        write_u32_fast(state, addr + 4, UInt32((val >> 32) & 0xFFFFFFFF))
+    end
+end
+
+# Optimized: pre-allocate result vector (kept for variable-length reads)
 @inline function read_bytes(state::PVMState, addr::UInt64, len::Int)
     result = Vector{UInt8}(undef, len)
     @inbounds for i in 1:len
@@ -552,7 +741,7 @@ end
     return result
 end
 
-# Optimized: inline loop for small writes
+# Optimized: inline loop for small writes (kept for variable-length writes)
 @inline function write_bytes(state::PVMState, addr::UInt64, data::Vector{UInt8})
     # Disabled stack frame tracing
     @inbounds for i in 1:length(data)
@@ -563,21 +752,46 @@ end
     end
 end
 
-# decode helpers
-function decode_immediate(state::PVMState, offset::Int, len::Int)
-    val = UInt64(0)
-    for i in 0:len-1
-        if state.pc + offset + i < length(state.instructions)
-            val |= UInt64(state.instructions[state.pc + offset + i + 1]) << (8*i)
+# decode helpers - OPTIMIZED with @inline and @inbounds
+@inline function decode_immediate(state::PVMState, offset::Int, len::Int)
+    @inbounds begin
+        val = UInt64(0)
+        base = Int(state.pc) + offset
+        instrs = state.instructions
+        n = length(instrs)
+        # Unrolled for common cases
+        if len >= 1 && base < n
+            val = UInt64(instrs[base + 1])
         end
+        if len >= 2 && base + 1 < n
+            val |= UInt64(instrs[base + 2]) << 8
+        end
+        if len >= 3 && base + 2 < n
+            val |= UInt64(instrs[base + 3]) << 16
+        end
+        if len >= 4 && base + 3 < n
+            val |= UInt64(instrs[base + 4]) << 24
+        end
+        if len >= 5 && base + 4 < n
+            val |= UInt64(instrs[base + 5]) << 32
+        end
+        if len >= 6 && base + 5 < n
+            val |= UInt64(instrs[base + 6]) << 40
+        end
+        if len >= 7 && base + 6 < n
+            val |= UInt64(instrs[base + 7]) << 48
+        end
+        if len >= 8 && base + 7 < n
+            val |= UInt64(instrs[base + 8]) << 56
+        end
+
+        # sign extend if MSB is set
+        if len > 0 && (val >> (8*len - 1)) & 1 == 1
+            val |= ~((UInt64(1) << (8*len)) - 1)
+        end
+
+        return val
     end
-    
-    # sign extend if MSB is set
-    if len > 0 && (val >> (8*len - 1)) & 1 == 1
-        val |= ~((UInt64(1) << (8*len)) - 1)
-    end
-    
-    return val
 end
 
 function decode_offset(state::PVMState, offset::Int, len::Int)
@@ -670,8 +884,8 @@ end
             0x00  # invalid -> trap
         end
 
-        # execute instruction
-        skip = skip_distance(state.opcode_mask, pc_idx)
+        # Use precomputed skip distance - O(1) instead of O(n) scan
+        skip = Int(state.skip_distances[pc_idx])
         execute_instruction!(state, opcode, skip)
 
         # advance pc if still running and not branching instruction
@@ -697,7 +911,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         
     elseif opcode == 1  # fallthrough
         # nop
-        
+
+    elseif opcode == 2  # memset (PolkaVM extension)
+        # memset rd, rs, value - fills memory; for interpreter, just advance PC
+        # TODO: implement properly if needed
+
+    elseif opcode == 3  # unlikely (PolkaVM branch hint)
+        # Tells JIT that branch is unlikely; interpreter treats as nop
+
     elseif opcode == 0x0A  # ecalli
         imm = decode_immediate(state, 1, min(4, skip))
         if TRACE_HOST_CALLS
@@ -722,14 +943,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         offset = decode_immediate(state, 1, 1)  # Only 1 byte for offset
         addr = state.registers[2 + 1] + offset  # SP is register 2
         val = UInt32(state.registers[1 + 1] & 0xFFFFFFFF)  # RA is register 1
-        # DEBUG: store_u32 sp-relative
-        write_bytes(state, addr, [
-            UInt8(val & 0xFF),
-            UInt8((val >> 8) & 0xFF),
-            UInt8((val >> 16) & 0xFF),
-            UInt8((val >> 24) & 0xFF)
-        ])
-        # After write_bytes
+        write_u32_fast(state, addr, val)  # Zero-allocation write
 
     elseif opcode == 0x11  # add_imm sp (register + immediate)
         # For 0x11, it's always SP (register 2)
@@ -750,12 +964,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         # Format: 0x15
         addr = state.registers[2 + 1]  # SP is register 2
         val = UInt32(state.registers[5 + 1] & 0xFFFFFFFF)  # S0 is register 5
-        write_bytes(state, addr, [
-            UInt8(val & 0xFF),
-            UInt8((val >> 8) & 0xFF),
-            UInt8((val >> 16) & 0xFF),
-            UInt8((val >> 24) & 0xFF)
-        ])
+        write_u32_fast(state, addr, val)  # Zero-allocation write
 
     elseif opcode == 20  # load_imm_64
         ra = get_register_index(state, 1, 0)
@@ -951,9 +1160,8 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
         addr = state.registers[ra + 1] + immx
-        val = immy % 2^32
-        bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:3]
-        write_bytes(state, addr, bytes)
+        val = UInt32(immy % 2^32)
+        write_u32_fast(state, addr, val)  # Zero-allocation write
         
     elseif opcode == 73  # store_imm_ind_u64
         ra = get_register_index(state, 1, 0)
@@ -962,8 +1170,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
         addr = state.registers[ra + 1] + immx
-        bytes = [UInt8((immy >> (8*i)) & 0xFF) for i in 0:7]
-        write_bytes(state, addr, bytes)
+        write_u64_fast(state, addr, immy)  # Zero-allocation write
         
     # instructions with one register, one immediate and one offset (80-90)
     elseif opcode == 80  # load_imm_jump
@@ -1140,9 +1347,9 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
                     idx_start = div(next_page_boundary, UInt32(PAGE_SIZE))
                     idx_end = div(final_boundary, UInt32(PAGE_SIZE))
 
-                    # Allocate pages in the new range
+                    # Pre-allocate sparse pages for heap in the new range
                     for page_idx in idx_start:(idx_end-1)
-                        state.memory.access[page_idx + 1] = WRITE
+                        state.memory.sparse.page_perms[page_idx] = true  # writable
                     end
                 end
 
@@ -1214,12 +1421,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         offset = decode_immediate(state, 2, min(skip - 1, 4))
         addr = state.registers[rb + 1] + offset
         val = UInt32(state.registers[rs + 1] & 0xFFFFFFFF)
-        write_bytes(state, addr, [
-            UInt8(val & 0xFF),
-            UInt8((val >> 8) & 0xFF),
-            UInt8((val >> 16) & 0xFF),
-            UInt8((val >> 24) & 0xFF)
-        ])
+        write_u32_fast(state, addr, val)  # Zero-allocation write
 
     # Note: opcode 0x78 (120) is store_ind_u8, handled below in the 120-161 range
 
@@ -1244,9 +1446,8 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         offset = decode_immediate(state, 2, min(skip - 1, 4))
         addr = state.registers[rb + 1] + offset
-        bytes = read_bytes(state, addr, 4)
-        if state.status == CONTINUE && length(bytes) == 4
-            val = UInt32(bytes[1]) | (UInt32(bytes[2]) << 8) | (UInt32(bytes[3]) << 16) | (UInt32(bytes[4]) << 24)
+        val = read_u32_fast(state, addr)  # Zero-allocation read
+        if state.status == CONTINUE
             # Sign extend
             if val & 0x80000000 != 0
                 state.registers[rd + 1] = UInt64(val) | 0xFFFFFFFF00000000
@@ -1303,8 +1504,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         if TRACE_EXECUTION
             println("    [STORE_IND_U64] val=0x$(string(val, base=16)) to addr=0x$(string(addr, base=16)) (r$(rb)+$(immx))")
         end
-        bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:7]
-        write_bytes(state, addr, bytes)
+        write_u64_fast(state, addr, val)  # Zero-allocation write
         
     elseif opcode == 124  # load_ind_u8
         ra = get_register_index(state, 1, 0)
@@ -1327,16 +1527,15 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, state.registers[rb + 1] + immx, 2)
-        state.registers[ra + 1] = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8)
+        val = read_u16_fast(state, state.registers[rb + 1] + immx)
+        state.registers[ra + 1] = UInt64(val)
         
     elseif opcode == 127  # load_ind_i16
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, state.registers[rb + 1] + immx, 2)
-        val = UInt16(bytes[1]) | (UInt16(bytes[2]) << 8)
+        val = read_u16_fast(state, state.registers[rb + 1] + immx)
         state.registers[ra + 1] = val >= 32768 ? UInt64(val) | 0xFFFFFFFFFFFF0000 : UInt64(val)
         
     elseif opcode == 128  # load_ind_u32
@@ -1345,26 +1544,17 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         addr = state.registers[rb + 1] + immx
-        bytes = read_bytes(state, addr, 4)
-        if length(bytes) < 4
-            state.status = FAULT
-            return
-        end
-        val = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
-        # Log indirect loads near error
-        step = get(task_local_storage(), :pvm_step_count, 0)
-        if (step >= 1 && step < 50) || (step >= 260 && step < 280)
-            println("    [LOAD_IND_U32] step=$step rb=$rb+$immx addr=0x$(string(UInt32(addr % 2^32), base=16, pad=8)) value=$val")
-        end
-        state.registers[ra + 1] = val
+        val = read_u32_fast(state, addr)  # Zero-allocation read
+        state.status != CONTINUE && return
+        state.registers[ra + 1] = UInt64(val)
         
     elseif opcode == 129  # load_ind_i32
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, state.registers[rb + 1] + immx, 4)
-        val = UInt32(bytes[1]) | (UInt32(bytes[2]) << 8) | (UInt32(bytes[3]) << 16) | (UInt32(bytes[4]) << 24)
+        val = read_u32_fast(state, state.registers[rb + 1] + immx)  # Zero-allocation read
+        state.status != CONTINUE && return
         state.registers[ra + 1] = sign_extend_32(val)
         
     elseif opcode == 130  # load_ind_u64
@@ -1373,19 +1563,9 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         addr = state.registers[rb + 1] + immx
-        step = get(task_local_storage(), :pvm_step_count, 0)
-        if TRACE_EXECUTION && step < 30
-            println("    [LOAD_IND_U64] r$ra = [r$rb+$immx] = [0x$(string(UInt32(state.registers[rb + 1] % 2^32), base=16))+$immx] = addr 0x$(string(UInt32(addr % 2^32), base=16))")
-        end
-        bytes = read_bytes(state, addr, 8)
-        # If read failed (returned fewer than 8 bytes), register not updated and status already set
-        if length(bytes) == 8
-            val = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
-            state.registers[ra + 1] = val
-            if TRACE_EXECUTION && step < 30
-                println("    [LOAD_IND_U64] loaded value: 0x$(string(val, base=16)) = $(val)")
-            end
-        end
+        val = read_u64_fast(state, addr)  # Zero-allocation read
+        state.status != CONTINUE && return
+        state.registers[ra + 1] = val
         
     elseif opcode == 131  # add_imm_32
         ra = get_register_index(state, 1, 0)
