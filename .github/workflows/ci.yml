@@ -12,11 +12,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup Julia
         uses: julia-actions/setup-julia@v2
         with:
-          version: '1.10'
+          version: '1.12'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Julia packages
         uses: actions/cache@v4
@@ -29,16 +34,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-julia-
 
-      - name: Install dependencies
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            deps/bandersnatch-ffi/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('deps/bandersnatch-ffi/Cargo.lock') }}
+
+      - name: Build bandersnatch-ffi
         run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.instantiate()
-          '
+          cd deps/bandersnatch-ffi
+          cargo build --release
+
+      - name: Install dependencies
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
       - name: Run tests
-        run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.test()
-          '
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
