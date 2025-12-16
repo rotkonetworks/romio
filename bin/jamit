@@ -157,6 +157,15 @@ function sync_chain_state!(state::LiveChainState)
         state.chain.finalized_height > 0 ? state.chain.blocks[state.chain.finalized_height + 1].hash : zeros(UInt8, 32),
         state.chain.finalized_height
     )
+
+    # Register all blocks for parent RPC lookup
+    for block in state.chain.blocks
+        state.blocks[block.hash] = Dict{String, Any}(
+            "slot" => block.timeslot,
+            "parent_hash" => block.parent_hash,
+            "parent_slot" => block.height > 0 ? state.chain.blocks[block.height].timeslot : UInt64(0)
+        )
+    end
 end
 
 compute_block_hash(h::UInt64, t::UInt64, p::Int, parent::Vector{UInt8}) =
