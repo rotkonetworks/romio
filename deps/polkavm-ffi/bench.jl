@@ -2,12 +2,12 @@
 include("../../src/pvm/polkavm_ffi.jl")
 using .PolkaVMFFI
 
-println("Creating engine...")
-engine = PvmEngine()
+println("Creating engine (interpreter mode)...")
+engine = PvmEngine(interpreter=true)
 println("Engine created successfully")
 
 # Load doom
-doom_path = "/tmp/polkajam-nightly-2025-12-15-linux-x86_64/doom.corevm"
+doom_path = "/tmp/polkajam-nightly-2025-12-22-linux-x86_64/doom.corevm"
 doom_data = read(doom_path)
 
 # Find PVM magic

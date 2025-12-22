@@ -28,6 +28,7 @@ println("Loading Doom PVM (pure Julia interpreter)...")
 
 # Load Doom corevm blob - try multiple paths
 doom_paths = [
+    "/tmp/polkajam-nightly-2025-12-22-linux-x86_64/doom.corevm",
     "/tmp/polkajam-nightly-2025-12-15-linux-x86_64/doom.corevm",
     "/tmp/polkajam-v0.1.27-linux-x86_64/doom.corevm",
     expanduser("~/doom.corevm"),

@@ -10,13 +10,42 @@ using libsodium_jll
 # Signing context for guarantees (graypaper XG)
 const GUARANTEE_SIGNING_CONTEXT = b"jam_guarantee"
 
-# Parse hex string to bytes
-function reports_parse_hex_bytes(hex_str::AbstractString)::Vector{UInt8}
-    s = startswith(hex_str, "0x") ? hex_str[3:end] : hex_str
-    if length(s) % 2 != 0
-        s = "0" * s
+# Hex character lookup table for fast parsing
+const HEX_LOOKUP = let
+    t = zeros(UInt8, 256)
+    for (i, c) in enumerate("0123456789")
+        t[UInt8(c) + 1] = i - 1
     end
-    return [parse(UInt8, s[i:i+1], base=16) for i in 1:2:length(s)]
+    for (i, c) in enumerate("abcdef")
+        t[UInt8(c) + 1] = i + 9
+    end
+    for (i, c) in enumerate("ABCDEF")
+        t[UInt8(c) + 1] = i + 9
+    end
+    t
+end
+
+# Parse hex string to bytes - optimized version
+@inline function reports_parse_hex_bytes(hex_str::AbstractString)::Vector{UInt8}
+    start = startswith(hex_str, "0x") ? 3 : 1
+    len = length(hex_str) - start + 1
+    if len <= 0
+        return UInt8[]
+    end
+    # Handle odd length
+    if len % 2 != 0
+        start -= 1
+        len += 1
+    end
+    result = Vector{UInt8}(undef, len >> 1)
+    j = 1
+    @inbounds for i in start:2:length(hex_str)
+        hi = HEX_LOOKUP[UInt8(hex_str[i]) + 1]
+        lo = HEX_LOOKUP[UInt8(hex_str[i + 1]) + 1]
+        result[j] = (hi << 4) | lo
+        j += 1
+    end
+    return result
 end
 
 # Blake2b hash (32 byte output)
@@ -28,27 +57,46 @@ function reports_blake2b_hash(data::Vector{UInt8})::Vector{UInt8}
     return out
 end
 
-# Convert bytes to hex string
-function reports_bytes_to_hex(bytes::Vector{UInt8})::String
-    return "0x" * join([string(b, base=16, pad=2) for b in bytes])
+# Hex digit lookup for fast encoding
+const HEX_CHARS = UInt8['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f']
+
+# Convert bytes to hex string - optimized version
+@inline function reports_bytes_to_hex(bytes::Vector{UInt8})::String
+    result = Vector{UInt8}(undef, 2 + 2 * length(bytes))
+    result[1] = UInt8('0')
+    result[2] = UInt8('x')
+    j = 3
+    @inbounds for b in bytes
+        result[j] = HEX_CHARS[(b >> 4) + 1]
+        result[j + 1] = HEX_CHARS[(b & 0x0f) + 1]
+        j += 2
+    end
+    return String(result)
 end
 
-# Encode natural number in JAM codec format
-function encode_natural(n::Integer)::Vector{UInt8}
-    if n < 0
-        error("Cannot encode negative natural number")
-    end
+# Preallocated buffer for encode_natural (max 10 bytes for u64)
+const NATURAL_BUFFER = Vector{UInt8}(undef, 10)
+
+# Encode natural number in JAM codec format - optimized
+@inline function encode_natural(n::Integer)::Vector{UInt8}
     if n < 128
-        return [UInt8(n)]
+        return UInt8[n]
     end
-    result = UInt8[]
+    # Count bytes needed
     remaining = n
+    len = 0
     while remaining > 0
-        push!(result, UInt8(remaining & 0x7f) | 0x80)
+        len += 1
         remaining >>= 7
     end
-    result[end] &= 0x7f  # Clear MSB on last byte
-    return reverse(result)
+    result = Vector{UInt8}(undef, len)
+    remaining = n
+    @inbounds for i in len:-1:1
+        result[i] = UInt8(remaining & 0x7f) | 0x80
+        remaining >>= 7
+    end
+    @inbounds result[len] &= 0x7f  # Clear MSB on last byte
+    return result
 end
 
 # Encode work report from JSON to bytes (for signature verification)

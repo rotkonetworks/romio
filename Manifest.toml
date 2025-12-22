@@ -2,7 +2,7 @@
 
 julia_version = "1.12.1"
 manifest_format = "2.0"
-project_hash = "9f2d09542b166e3c3ee3098e7322aeaefc566f4c"
+project_hash = "9eb5d14d7e39f892c2c49489ab59677b3adf6139"
 
 [[deps.ArgParse]]
 deps = ["Logging", "TextWrap"]
@@ -27,6 +27,12 @@ deps = ["SHA"]
 git-tree-sha1 = "542f94c2e6049458e1b7a489b9c2b0cddae59cc4"
 uuid = "225b011c-e439-4471-b39b-04a9a0fe32f0"
 version = "0.1.0"
+
+[[deps.BenchmarkTools]]
+deps = ["Compat", "JSON", "Logging", "Printf", "Profile", "Statistics", "UUIDs"]
+git-tree-sha1 = "7fecfb1123b8d0232218e2da0c213004ff15358d"
+uuid = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+version = "1.6.3"
 
 [[deps.BerkeleyDB_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "OpenSSL_jll"]
@@ -90,6 +96,16 @@ deps = ["Configurations", "ExproniconLite", "Libdl", "Logging", "Markdown", "Ord
 git-tree-sha1 = "dedac9d02fdccd2948eda1d2ed6f0c2f9f9f00f4"
 uuid = "863f3e99-da2a-4334-8734-de3dacbe5542"
 version = "1.0.8"
+
+[[deps.Compat]]
+deps = ["TOML", "UUIDs"]
+git-tree-sha1 = "9d8a54ce4b17aa5bdce0ea5c34bc5e7c340d16ad"
+uuid = "34da2185-b29b-5c13-b0c7-acf172513d20"
+version = "4.18.1"
+weakdeps = ["Dates", "LinearAlgebra"]
+
+    [deps.Compat.extensions]
+    CompatLinearAlgebraExt = "LinearAlgebra"
 
 [[deps.CompilerSupportLibraries_jll]]
 deps = ["Artifacts", "Libdl"]
@@ -287,7 +303,7 @@ uuid = "82899510-4779-5014-852e-03e436cf321d"
 version = "1.0.0"
 
 [[deps.JAM]]
-deps = ["ArgParse", "BatchedMerkleTree", "BinaryFields", "BinaryReedSolomon", "BitIntegers", "Comonicon", "DataStructures", "JSON", "Keccak", "PrecompileTools", "Quic", "SDL2_jll", "SHA", "SimpleDirectMediaLayer", "Sockets", "StaticArrays", "StructArrays", "TOML"]
+deps = ["ArgParse", "BatchedMerkleTree", "BinaryFields", "BinaryReedSolomon", "BitIntegers", "Comonicon", "DataStructures", "JSON", "Keccak", "PackageCompiler", "PrecompileTools", "Quic", "SDL2_jll", "SHA", "SimpleDirectMediaLayer", "Sockets", "StaticArrays", "StructArrays", "TOML", "UnsafeArrays"]
 path = "."
 uuid = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 version = "0.1.0"
@@ -560,6 +576,11 @@ deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 version = "1.11.0"
 
+[[deps.Profile]]
+deps = ["StyledStrings"]
+uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+version = "1.11.0"
+
 [[deps.PulseAudio_jll]]
 deps = ["Artifacts", "BlueZ_jll", "Dbus_jll", "FFTW_jll", "GStreamer_jll", "Gdbm_jll", "Glib_jll", "JLLWrappers", "Libdl", "Libiconv_jll", "Libtool_jll", "OpenSSL_jll", "SBC_jll", "SoXResampler_jll", "SpeexDSP_jll", "alsa_jll", "eudev_jll", "libasyncns_jll", "libcap_jll", "libsndfile_jll"]
 git-tree-sha1 = "df6d51f380df6e16fdae052e15bd2c02a17fe98f"
@@ -781,6 +802,11 @@ version = "1.11.0"
 [[deps.Unicode]]
 uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
 version = "1.11.0"
+
+[[deps.UnsafeArrays]]
+git-tree-sha1 = "efcbb6828697ffffc245a9de7300552535abe005"
+uuid = "c4a57d5a-5b31-53a6-b365-19f8c011fbd6"
+version = "1.0.8"
 
 [[deps.XML2_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Libiconv_jll", "Zlib_jll"]

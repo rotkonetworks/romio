@@ -5,7 +5,6 @@ export State, state_transition, initial_state
 
 # include all necessary types
 include("../types/basic.jl")
-include("../types/crypto.jl")
 include("../types/work.jl")
 include("../types/validator.jl")
 include("../types/accumulate.jl")

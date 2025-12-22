@@ -2,7 +2,6 @@
 
 # include all required modules
 include("types/basic.jl")
-include("types/crypto.jl")
 include("types/work.jl")
 include("types/validator.jl")
 include("types/accumulate.jl")

@@ -1,0 +1,15 @@
+[package]
+name = "paritydb-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+parity-db = "0.5"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1

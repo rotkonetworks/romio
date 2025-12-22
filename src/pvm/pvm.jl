@@ -187,6 +187,22 @@ struct MemoryDataWrapper
     mem::Memory
 end
 
+# Length for compatibility with code that checks bounds
+Base.length(w::MemoryDataWrapper) = typemax(UInt32)
+
+# copyto! for bulk memory operations
+function Base.copyto!(w::MemoryDataWrapper, dest_offset::Integer, src::Vector{UInt8}, src_offset::Integer, n::Integer)
+    for i in 0:n-1
+        w[dest_offset + i] = src[src_offset + i]
+    end
+    return w
+end
+
+# Range indexing for slicing
+function Base.getindex(w::MemoryDataWrapper, r::UnitRange{<:Integer})
+    return [w[i] for i in r]
+end
+
 @inline function Base.getindex(w::MemoryDataWrapper, addr::Integer)::UInt8
     addr32 = UInt32(addr - 1)  # Convert 1-indexed to 0-indexed
     mem = w.mem
@@ -606,9 +622,11 @@ end
             return stack.data[addr32 - stack.base + 1]
         end
 
-        # Fallback to sparse (heap)
-        if addr32 >= mem.heap_base && addr32 < mem.current_heap_pointer
-            return sparse_read(mem.sparse, addr32)
+        # Fallback to sparse (heap and other dynamic areas like input)
+        # Check if the address exists in sparse memory
+        val = sparse_read(mem.sparse, addr32)
+        if val != 0x00 || haskey(mem.sparse.pages, addr32 >> 12)
+            return val
         end
 
         # No access
@@ -921,19 +939,7 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
 
     elseif opcode == 0x0A  # ecalli
         imm = decode_immediate(state, 1, min(4, skip))
-        if TRACE_HOST_CALLS
-            println("    [ECALLI] id=$imm at PC=0x$(string(state.pc, base=16)), r7=$(state.registers[8])")
-        end
-        if imm == 100
-            # Show exactly what bytes we're reading
-            bytes_shown = min(10, length(state.instructions) - Int(state.pc))
-            instr_bytes = state.instructions[state.pc+1:state.pc+bytes_shown]
-            println("      Instruction bytes: $(instr_bytes)")
-            println("      Decoded immediate (len=$(min(4, skip))): $imm")
-            println("      Registers: r7=$(state.registers[8]), r10=$(state.registers[11])")
-        end
         state.status = HOST
-        # store host call id in dedicated field (don't overwrite registers!)
         state.host_call_id = UInt32(imm)
 
     elseif opcode == 16  # store_u32 sp-relative (0x10)
@@ -984,25 +990,21 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
-        val = UInt16(immy % 2^16)
-        write_bytes(state, immx, [UInt8(val & 0xFF), UInt8(val >> 8)])
+        write_u16_fast(state, immx, UInt16(immy % 2^16))
         
     elseif opcode == 32  # store_imm_u32
         lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
-        val = UInt32(immy % 2^32)
-        bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:3]
-        write_bytes(state, immx, bytes)
-        
+        write_u32_fast(state, immx, UInt32(immy % 2^32))
+
     elseif opcode == 33  # store_imm_u64
         lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
         immy = decode_immediate(state, 2 + lx, ly)
-        bytes = [UInt8((immy >> (8*i)) & 0xFF) for i in 0:7]
-        write_bytes(state, immx, bytes)
+        write_u64_fast(state, immx, immy)
         
     elseif opcode == 40  # jump
         offset = decode_offset(state, 1, min(4, skip))
@@ -1113,25 +1115,19 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        val = state.registers[ra + 1] % 2^16
-        write_bytes(state, immx, [UInt8(val & 0xFF), UInt8((val >> 8) & 0xFF)])
+        write_u16_fast(state, immx, UInt16(state.registers[ra + 1] % 2^16))
         
     elseif opcode == 61  # store_u32
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        val = state.registers[ra + 1] % 2^32
-        bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:3]
-        write_bytes(state, immx, bytes)
-        
+        write_u32_fast(state, immx, UInt32(state.registers[ra + 1] % 2^32))
+
     elseif opcode == 62  # store_u64
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        val = state.registers[ra + 1]
-        bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:7]
-
-        write_bytes(state, immx, bytes)
+        write_u64_fast(state, immx, state.registers[ra + 1])
         
     # instructions with one register & two immediates (70-73)
     elseif opcode == 70  # store_imm_ind_u8
@@ -1482,17 +1478,14 @@ function execute_instruction!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        val = state.registers[ra + 1] % 2^16
-        write_bytes(state, state.registers[rb + 1] + immx, [UInt8(val & 0xFF), UInt8((val >> 8) & 0xFF)])
+        write_u16_fast(state, state.registers[rb + 1] + immx, UInt16(state.registers[ra + 1] % 2^16))
         
     elseif opcode == 122  # store_ind_u32
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        val = state.registers[ra + 1] % 2^32
-        bytes = [UInt8((val >> (8*i)) & 0xFF) for i in 0:3]
-        write_bytes(state, state.registers[rb + 1] + immx, bytes)
+        write_u32_fast(state, state.registers[rb + 1] + immx, UInt32(state.registers[ra + 1] % 2^32))
         
     elseif opcode == 123  # store_ind_u64
         ra = get_register_index(state, 1, 0)
@@ -2302,6 +2295,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
         Int64(gas),  # gas
         instructions,  # instructions
         opcode_mask,  # opcode_mask
+        precompute_skip_distances(opcode_mask),  # skip_distances
         zeros(UInt64, 13),  # registers
         Memory(),  # memory
         jump_table,  # jump_table
@@ -2430,6 +2424,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
         Int64(gas),  # gas
         instructions,  # instructions
         opcode_mask,  # opcode_mask
+        precompute_skip_distances(opcode_mask),  # skip_distances
         registers,  # registers with proper initial values
         Memory(),  # memory
         jump_table,  # jump_table
@@ -2646,11 +2641,9 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     input_start = UInt32(2^32 - ZONE_SIZE - MAX_INPUT)
     # println("  [MEM SETUP] input: 0x$(string(input_start, base=16)) ($(length(input)) bytes)")
 
-    # Write input to high memory
-    # state.memory.data is 1-indexed, input_start is 0-indexed address
-    # input[1] goes to memory address input_start, which is state.memory.data[input_start + 1]
+    # Write input to sparse memory (used by FlatRegion-based read/write)
     for i in 1:min(length(input), MAX_INPUT)
-        state.memory.data[input_start + i] = input[i]
+        sparse_write!(state.memory.sparse, input_start + UInt32(i - 1), input[i])
     end
 
     # Mark input/output pages as writable (program reads input and writes output here)
@@ -2666,6 +2659,16 @@ function setup_memory!(state::PVMState, input::Vector{UInt8}, ro_data::Vector{UI
     for page in div(stack_bottom, PAGE_SIZE):div(stack_top, PAGE_SIZE)
         state.memory.access[page + 1] = WRITE
     end
+
+    # Initialize the FlatRegion-based memory system (used by optimized read/write paths)
+    ro_size = rnp(UInt32(length(ro_data)))
+    # RW region needs to extend at least one zone beyond data for BSS
+    rw_size = max(rnp(UInt32(length(rw_data))), UInt32(ZONE_SIZE))
+    init_memory_regions!(state.memory,
+        ro_data_start, ro_size, ro_data,
+        rw_data_start, rw_size, rw_data,
+        stack_bottom, stack_top,
+        heap_start, stack_bottom)  # heap_limit is where stack begins
 
     # Set up stack frame for polkavm ABI compatibility
     # The test-service's prologue loads saved registers from the stack.
@@ -2721,6 +2724,7 @@ function extract_output(state::PVMState)
     return output
 end
 
-export execute, PVMState, Memory, HALT, PANIC, OOG, FAULT, HOST
+export execute, PVMState, Memory, HALT, PANIC, OOG, FAULT, HOST, CONTINUE
+export step!, init_memory_regions!, precompute_skip_distances, skip_distance
 
 end # module PVM
