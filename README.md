@@ -3,6 +3,8 @@
 JAM (Join Accumulate Machine) implementation in Julia.
 
 ## Status
+<img width="949" height="601" alt="image" src="https://github.com/user-attachments/assets/c26b54be-1536-4a57-8bd1-3af5ddb9a2a8" />
+
 
 149/149 STF tests passing (100%)
 
