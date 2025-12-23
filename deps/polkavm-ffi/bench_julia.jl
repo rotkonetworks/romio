@@ -98,42 +98,35 @@ fb_callback = function(pvm_state, fb_addr, fb_size)
 end
 set_framebuffer_callback!(corevm, fb_callback)
 
-# warmup phase for JIT compilation
-println("warming up (20 frames)...")
-while frame_count < 20 && state.gas > 0
-    PVM.step!(state)
-    if state.status == PVM.HOST
-        handled = handle_corevm_host_call!(state, corevm)
-        if handled
-            skip = PVM.skip_distance(state.opcode_mask, Int(state.pc) + 1)
-            state.pc = state.pc + 1 + skip
-        end
-    end
-end
-
-println("running benchmark (100 frames)...")
-frame_start = frame_count
-start = time()
-
-while frame_count < frame_start + 100 && state.gas > 0
-    PVM.step!(state)
-
-    if state.status == PVM.HOST
-        handled = handle_corevm_host_call!(state, corevm)
-        if handled
-            skip = PVM.skip_distance(state.opcode_mask, Int(state.pc) + 1)
-            state.pc = state.pc + 1 + skip
-        else
-            println("unhandled host call: $(state.host_call_id)")
+# benchmark loop - must be in a function for Julia to optimize properly
+function run_benchmark(state, corevm, n_frames)
+    local frame_start = frame_count
+    while frame_count < frame_start + n_frames && state.gas > 0
+        PVM.step!(state)
+        if state.status == PVM.HOST
+            handled = handle_corevm_host_call!(state, corevm)
+            if handled
+                skip = PVM.skip_distance(state.opcode_mask, Int(state.pc) + 1)
+                state.pc = state.pc + 1 + skip
+            else
+                println("unhandled host call: $(state.host_call_id)")
+                break
+            end
+        elseif state.status != PVM.CONTINUE
+            println("stopped with status $(state.status)")
             break
         end
-    elseif state.status != PVM.CONTINUE
-        println("stopped with status $(state.status)")
-        break
     end
+    return frame_count - frame_start
 end
 
+# warmup phase for JIT compilation
+println("warming up (20 frames)...")
+run_benchmark(state, corevm, 20)
+
+println("running benchmark (100 frames)...")
+start = time()
+frames = run_benchmark(state, corevm, 100)
 elapsed = time() - start
-frames = frame_count - frame_start
 fps = frames / elapsed
 println("rendered $frames frames in $(round(elapsed, digits=2))s = $(round(fps, digits=2)) fps")

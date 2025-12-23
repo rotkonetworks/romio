@@ -1302,13 +1302,6 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
         val = UInt64(read_u8(state, immx))
-        # Log input buffer reads
-        step = get(task_local_storage(), :pvm_step_count, 0)
-        if step >= 1 && step < 30
-            if immx >= 0xfef00000  # Input buffer region
-                println("    [LOAD_U8] step=$step addr=0x$(string(immx, base=16, pad=8)) value=$val")
-            end
-        end
         state.registers[ra + 1] = val
         
     elseif opcode == 53  # load_i8
@@ -1322,46 +1315,34 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, immx, 2)
-        state.registers[ra + 1] = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8)
-        
+        state.registers[ra + 1] = UInt64(read_u16_fast(state, immx))
+
     elseif opcode == 55  # load_i16
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, immx, 2)
-        val = UInt16(bytes[1]) | (UInt16(bytes[2]) << 8)
-        state.registers[ra + 1] = val >= 32768 ? UInt64(val) | 0xFFFFFFFFFFFF0000 : UInt64(val)
+        val = read_u16_fast(state, immx)
+        state.registers[ra + 1] = val >= 0x8000 ? UInt64(val) | 0xFFFFFFFFFFFF0000 : UInt64(val)
         
     elseif opcode == 56  # load_u32
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, immx, 4)
-        val = UInt64(bytes[1]) | (UInt64(bytes[2]) << 8) | (UInt64(bytes[3]) << 16) | (UInt64(bytes[4]) << 24)
-        # Log input buffer reads
-        step = get(task_local_storage(), :pvm_step_count, 0)
-        if step >= 1 && step < 30
-            if immx >= 0xfef00000  # Input buffer region
-                println("    [LOAD_U32] step=$step addr=0x$(string(immx, base=16, pad=8)) value=$val")
-            end
-        end
-        state.registers[ra + 1] = val
+        val = read_u32_fast(state, immx)
+        state.registers[ra + 1] = UInt64(val)
         
     elseif opcode == 57  # load_i32
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, immx, 4)
-        val = UInt32(bytes[1]) | (UInt32(bytes[2]) << 8) | (UInt32(bytes[3]) << 16) | (UInt32(bytes[4]) << 24)
+        val = read_u32_fast(state, immx)
         state.registers[ra + 1] = sign_extend_32(val)
-        
+
     elseif opcode == 58  # load_u64
         ra = get_register_index(state, 1, 0)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
-        bytes = read_bytes(state, immx, 8)
-        state.registers[ra + 1] = sum(UInt64(bytes[i+1]) << (8*i) for i in 0:7)
+        state.registers[ra + 1] = read_u64_fast(state, immx)
         
     elseif opcode == 59  # store_u8
         ra = get_register_index(state, 1, 0)
@@ -1757,10 +1738,7 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
         val = state.registers[ra + 1]
         addr = state.registers[rb + 1] + immx
-        if TRACE_EXECUTION
-            println("    [STORE_IND_U64] val=0x$(string(val, base=16)) to addr=0x$(string(addr, base=16)) (r$(rb)+$(immx))")
-        end
-        write_u64_fast(state, addr, val)  # Zero-allocation write
+        write_u64_fast(state, addr, val)
 
     elseif opcode == 124  # load_ind_u8
         ra = get_register_index(state, 1, 0)
@@ -2103,11 +2081,7 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         offset = decode_offset(state, 2, lx)
         va = state.registers[ra + 1]
         vb = state.registers[rb + 1]
-        taken = va >= vb
-        if TRACE_EXECUTION
-            println("    [BRANCH_GE_U] r$(ra)($(va)) >= r$(rb)($(vb)) = $(taken), offset=$(offset)")
-        end
-        if taken
+        if va >= vb
             state.pc = UInt32((Int32(state.pc) + offset) % 2^32)
         else
             state.pc += 1 + skip
@@ -2378,12 +2352,7 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
         rd = get_register_index(state, 2, 0)
-        result = state.registers[ra + 1] & ~state.registers[rb + 1]
-        step = get(task_local_storage(), :pvm_step_count, 0)
-        if TRACE_EXECUTION && step < 30
-            println("    [AND_INV] r$rd = r$ra(0x$(string(state.registers[ra + 1], base=16))) & ~r$rb(0x$(string(state.registers[rb + 1], base=16))) = 0x$(string(result, base=16))")
-        end
-        state.registers[rd + 1] = result
+        state.registers[rd + 1] = state.registers[ra + 1] & ~state.registers[rb + 1]
         
     elseif opcode == 225  # or_inv
         ra = get_register_index(state, 1, 0)
@@ -2696,9 +2665,6 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     max_steps = 100000000  # 100M step limit for safety
 
     while state.gas > 0 && step_count < max_steps
-        # Store step count for debug logging
-        task_local_storage(:pvm_step_count, step_count)
-
         # Debug trace - print every instruction for first 60 steps
         if TRACE_EXECUTION && step_count < 60
             pc_idx = state.pc + 1
