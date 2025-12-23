@@ -44,6 +44,7 @@ const PANIC = UInt32(1)
 const OOG = UInt32(2)
 const FAULT = UInt32(3)
 const HOST = UInt32(4)
+const STEP = UInt32(5)
 
 # Opaque handle types
 const PvmEnginePtr = Ptr{Cvoid}
@@ -70,6 +71,13 @@ end
 """Load a module from a blob"""
 function module_new(engine::PvmEnginePtr, blob::Vector{UInt8})::PvmModulePtr
     ccall(dlsym(LIBPOLKAVM, :pvm_module_new), PvmModulePtr,
+          (PvmEnginePtr, Ptr{UInt8}, Csize_t),
+          engine, blob, length(blob))
+end
+
+"""Load a module with step tracing enabled (for debugging)"""
+function module_new_step(engine::PvmEnginePtr, blob::Vector{UInt8})::PvmModulePtr
+    ccall(dlsym(LIBPOLKAVM, :pvm_module_new_step), PvmModulePtr,
           (PvmEnginePtr, Ptr{UInt8}, Csize_t),
           engine, blob, length(blob))
 end
@@ -234,6 +242,16 @@ mutable struct PvmModule
         ptr = module_new(engine.ptr, blob)
         if ptr == C_NULL
             error("Failed to load PolkaVM module from blob")
+        end
+        mod = new(ptr, engine)
+        finalizer(m -> module_free(m.ptr), mod)
+        mod
+    end
+
+    # Constructor with pre-created ptr (for step tracing modules)
+    function PvmModule(ptr::PvmModulePtr, engine::PvmEngine)
+        if ptr == C_NULL
+            error("Failed to load PolkaVM module - null pointer")
         end
         mod = new(ptr, engine)
         finalizer(m -> module_free(m.ptr), mod)

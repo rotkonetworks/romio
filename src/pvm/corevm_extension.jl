@@ -20,9 +20,9 @@ mutable struct CoreVMHostCalls
     width::UInt32
     height::UInt32
 
-    # Heap management
+    # Heap management (polkavm sbrk semantics: heap_pages is count, not bytes)
     heap_base::UInt32
-    heap_ptr::UInt32
+    heap_pages::UInt32  # number of pages allocated (not byte pointer)
 
     # Framebuffer callback: (state, fb_addr, fb_size) -> nothing
     framebuffer_callback::Union{Function, Nothing}
@@ -38,7 +38,7 @@ function CoreVMHostCalls(; width=320, height=200, heap_base=UInt32(0x100000))
         UInt32(width),
         UInt32(height),
         UInt32(heap_base),
-        UInt32(heap_base),
+        UInt32(0),  # heap_pages starts at 0
         nothing
     )
 end
@@ -60,7 +60,7 @@ Set the heap base address after memory setup.
 """
 function set_heap_base!(ext::CoreVMHostCalls, base::UInt32)
     ext.heap_base = base
-    ext.heap_ptr = base
+    ext.heap_pages = UInt32(0)  # reset page count
 end
 
 """
@@ -83,11 +83,15 @@ function handle_corevm_host_call!(state::PVMState, ext::CoreVMHostCalls)
     elseif call_id == COREVM_SBRK
         # SBRK: Allocate heap pages
         # Input: ω7 = pages to allocate
-        # Output: ω7 = pointer to allocated memory
+        # Output: ω7 = heap_base + NEW_page_count (polkavm sbrk semantics)
+        # polkavm sbrk returns heap_base + new_heap_size (after allocation)
         pages = UInt32(state.registers[8])
-        old_ptr = ext.heap_ptr
-        ext.heap_ptr += pages * 4096
-        state.registers[8] = UInt64(old_ptr)
+        ext.heap_pages += pages
+        # Return value: heap_base + new_page_count (matches polkavm behavior)
+        returned_addr = ext.heap_base + ext.heap_pages
+        # Sync with PVM memory state (still use byte address for memory bounds)
+        state.memory.current_heap_pointer = ext.heap_base + ext.heap_pages * 4096
+        state.registers[8] = UInt64(returned_addr)
         state.gas -= 10
         state.status = CONTINUE
         return true

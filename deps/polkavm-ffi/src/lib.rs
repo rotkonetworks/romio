@@ -57,6 +57,38 @@ pub extern "C" fn pvm_engine_new_interpreter() -> *mut PvmEngine {
     }
 }
 
+/// Load a module with step tracing enabled (for debugging)
+#[no_mangle]
+pub extern "C" fn pvm_module_new_step(
+    engine: *mut PvmEngine,
+    blob_ptr: *const u8,
+    blob_len: usize,
+) -> *mut PvmModule {
+    if engine.is_null() || blob_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let engine = unsafe { &(*engine).engine };
+    let blob = unsafe { slice::from_raw_parts(blob_ptr, blob_len) };
+
+    // Parse the blob
+    let program_blob = match ProgramBlob::parse(blob.into()) {
+        Ok(blob) => blob,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    // Configure module with gas metering AND step tracing
+    let mut module_config = ModuleConfig::default();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_step_tracing(true);
+
+    // Compile the module
+    match Module::from_blob(engine, &module_config, program_blob) {
+        Ok(module) => Box::into_raw(Box::new(PvmModule { module })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Free a PolkaVM engine
 #[no_mangle]
 pub extern "C" fn pvm_engine_free(engine: *mut PvmEngine) {
@@ -309,7 +341,7 @@ pub extern "C" fn pvm_instance_run(instance: *mut PvmInstance) -> PvmResult {
             host_call: 0,
         },
         Ok(polkavm::InterruptKind::Step) => PvmResult {
-            status: 4, // HOST (step mode)
+            status: 5, // STEP (step tracing mode, continue running)
             gas_remaining: instance.gas(),
             host_call: 0,
         },

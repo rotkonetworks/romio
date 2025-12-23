@@ -93,18 +93,26 @@ align_64k(x) = (x + VM_MAX_PAGE_SIZE - 1) & ~(VM_MAX_PAGE_SIZE - 1)
 ro_data_address_space = align_64k(prog.ro_data_size)
 rw_data_address_space = align_64k(prog.rw_data_size)
 
+# Page sizes for alignment
+const PAGE_SIZE = UInt32(0x1000)  # 4KB page size for memory protection
+align_4k(x) = (x + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
+const RW_SIZE_ALIGNED = align_4k(prog.rw_data_size)
+
 const RO_BASE = UInt32(VM_ADDRESS_SPACE_BOTTOM)  # 0x10000
 const RW_BASE = UInt32(RO_BASE + ro_data_address_space + VM_MAX_PAGE_SIZE)  # after RO + guard
-const STACK_HIGH = UInt32(0xFFFF0000 - VM_MAX_PAGE_SIZE)  # below return-to-host region
-const STACK_LOW = UInt32(STACK_HIGH - prog.stack_size)
-# Use declared RW size (not actual data length) for heap base calculation
-# The RW region may be larger than the initialized data (BSS section)
+# Stack region: includes area above initial SP for frame setup and aux data
+# polkavm-ffi uses 0xfffd0000 - 0xFFFF1000 to allow positive offsets from SP
+const STACK_TOP = UInt32(0xFFFF1000)   # highest accessible stack address
+const STACK_START = UInt32(0xFFFE0000) # initial SP value
+const STACK_LOW = UInt32(0xFFFD0000)   # stack grows downward
+# HEAP_BASE must use exact rw_data_size to match polkavm sbrk semantics
+# polkavm sbrk returns heap_base + page_count, NOT byte addresses
 const HEAP_BASE = UInt32(RW_BASE + prog.rw_data_size)
 
 println("Memory layout:")
 println("  RO:    0x$(string(RO_BASE, base=16)) - 0x$(string(RO_BASE + UInt32(length(prog.ro_data)), base=16))")
 println("  RW:    0x$(string(RW_BASE, base=16)) - 0x$(string(RW_BASE + UInt32(length(prog.rw_data)), base=16))")
-println("  Stack: 0x$(string(STACK_LOW, base=16)) - 0x$(string(STACK_HIGH, base=16))")
+println("  Stack: 0x$(string(STACK_LOW, base=16)) - 0x$(string(STACK_TOP, base=16)) (SP starts at 0x$(string(STACK_START, base=16)))")
 println("  Heap:  0x$(string(HEAP_BASE, base=16))+")
 
 # Create CoreVM extension
@@ -117,24 +125,24 @@ skip_distances = PVM.precompute_skip_distances(opcode_mask)
 # Create PVM state with proper memory layout
 println("Creating PVM state...")
 
-# Expand RW data to full declared size (BSS section is zero-initialized)
-rw_data_full = Vector{UInt8}(undef, prog.rw_data_size)
+# Expand RW data to page-aligned size (BSS section is zero-initialized)
+rw_data_full = Vector{UInt8}(undef, RW_SIZE_ALIGNED)
 fill!(rw_data_full, 0)
 copyto!(rw_data_full, 1, prog.rw_data, 1, length(prog.rw_data))
-println("  Expanded RW data: $(length(prog.rw_data)) -> $(length(rw_data_full)) bytes")
+println("  Expanded RW data: $(length(prog.rw_data)) -> $(length(rw_data_full)) bytes (page-aligned)")
 
 memory = PVM.Memory()
 PVM.init_memory_regions!(memory,
     RO_BASE, UInt32(length(prog.ro_data)), prog.ro_data,
     RW_BASE, UInt32(length(rw_data_full)), rw_data_full,
-    STACK_LOW, STACK_HIGH,
+    STACK_LOW, STACK_TOP,
     HEAP_BASE, STACK_LOW  # heap limit = stack start
 )
 
 # Initialize registers
 regs = zeros(UInt64, 13)
 regs[1] = UInt64(0xFFFF0000)  # ω0 = RA = return address
-regs[2] = UInt64(STACK_HIGH)   # ω1 = SP = stack pointer
+regs[2] = UInt64(STACK_START)  # ω1 = SP = stack pointer (below STACK_TOP, room for frame setup)
 
 state = PVM.PVMState(
     UInt32(0),  # pc

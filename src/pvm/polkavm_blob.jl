@@ -113,7 +113,11 @@ function parse_polkavm_blob(blob::Vector{UInt8})
     offset += 1
 
     # Determine ISA from version
-    is_64_bit = version >= 2  # Version 1 = 32-bit, Version 2+ = 64-bit
+    # Version 0 = ReviveV1 (64-bit)
+    # Version 1 = Latest32 (32-bit)
+    # Version 2 = Latest64 (64-bit)
+    # Version 3 = JamV1 (64-bit)
+    is_64_bit = version != 1  # Only version 1 is 32-bit
 
     # Skip blob length (8 bytes)
     offset += BLOB_LEN_SIZE
