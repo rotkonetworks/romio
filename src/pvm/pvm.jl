@@ -683,8 +683,43 @@ end
 end
 
 # Optimized: Zero-allocation read for 32-bit values
+# Direct word read from flat region using unsafe_load for maximum speed
+@inline function region_read_u32(data::Vector{UInt8}, offset::Int)::UInt32
+    GC.@preserve data begin
+        ptr = pointer(data, offset)
+        unsafe_load(Ptr{UInt32}(ptr))
+    end
+end
+
+@inline function region_read_u64(data::Vector{UInt8}, offset::Int)::UInt64
+    GC.@preserve data begin
+        ptr = pointer(data, offset)
+        unsafe_load(Ptr{UInt64}(ptr))
+    end
+end
+
 @inline function read_u32_fast(state::PVMState, addr::UInt64)::UInt32
     @inbounds begin
+        addr32 = UInt32(addr & 0xFFFFFFFF)
+        mem = state.memory
+
+        # Single region check for entire word
+        ro = mem.ro_region
+        if addr32 >= ro.base && addr32 + 3 < ro.limit
+            return region_read_u32(ro.data, Int(addr32 - ro.base + 1))
+        end
+
+        rw = mem.rw_region
+        if addr32 >= rw.base && addr32 + 3 < rw.limit
+            return region_read_u32(rw.data, Int(addr32 - rw.base + 1))
+        end
+
+        stack = mem.stack_region
+        if addr32 >= stack.base && addr32 + 3 < stack.limit
+            return region_read_u32(stack.data, Int(addr32 - stack.base + 1))
+        end
+
+        # Fallback to byte-by-byte for cross-region or sparse
         b0 = read_u8(state, addr)
         state.status != CONTINUE && return UInt32(0)
         b1 = read_u8(state, addr + 1)
@@ -696,9 +731,41 @@ end
     end
 end
 
+# Direct word write to flat region using unsafe_store! for maximum speed
+@inline function region_write_u32!(data::Vector{UInt8}, offset::Int, val::UInt32)
+    GC.@preserve data begin
+        ptr = pointer(data, offset)
+        unsafe_store!(Ptr{UInt32}(ptr), val)
+    end
+end
+
+@inline function region_write_u64!(data::Vector{UInt8}, offset::Int, val::UInt64)
+    GC.@preserve data begin
+        ptr = pointer(data, offset)
+        unsafe_store!(Ptr{UInt64}(ptr), val)
+    end
+end
+
 # Optimized: Zero-allocation write for 32-bit values
 @inline function write_u32_fast(state::PVMState, addr::UInt64, val::UInt32)
     @inbounds begin
+        addr32 = UInt32(addr & 0xFFFFFFFF)
+        mem = state.memory
+
+        # Single region check for entire word (only writable regions)
+        rw = mem.rw_region
+        if addr32 >= rw.base && addr32 + 3 < rw.limit
+            region_write_u32!(rw.data, Int(addr32 - rw.base + 1), val)
+            return
+        end
+
+        stack = mem.stack_region
+        if addr32 >= stack.base && addr32 + 3 < stack.limit
+            region_write_u32!(stack.data, Int(addr32 - stack.base + 1), val)
+            return
+        end
+
+        # Fallback to byte-by-byte
         write_u8(state, addr, UInt8(val & 0xFF))
         state.status != CONTINUE && return
         write_u8(state, addr + 1, UInt8((val >> 8) & 0xFF))
@@ -728,9 +795,29 @@ end
     end
 end
 
-# Optimized: Zero-allocation read for 64-bit values
+# Optimized: Zero-allocation read for 64-bit values - direct word read
 @inline function read_u64_fast(state::PVMState, addr::UInt64)::UInt64
     @inbounds begin
+        addr32 = UInt32(addr & 0xFFFFFFFF)
+        mem = state.memory
+
+        # Single region check for entire 8-byte word
+        ro = mem.ro_region
+        if addr32 >= ro.base && addr32 + 7 < ro.limit
+            return region_read_u64(ro.data, Int(addr32 - ro.base + 1))
+        end
+
+        rw = mem.rw_region
+        if addr32 >= rw.base && addr32 + 7 < rw.limit
+            return region_read_u64(rw.data, Int(addr32 - rw.base + 1))
+        end
+
+        stack = mem.stack_region
+        if addr32 >= stack.base && addr32 + 7 < stack.limit
+            return region_read_u64(stack.data, Int(addr32 - stack.base + 1))
+        end
+
+        # Fallback to two 32-bit reads
         lo = UInt64(read_u32_fast(state, addr))
         state.status != CONTINUE && return UInt64(0)
         hi = UInt64(read_u32_fast(state, addr + 4))
@@ -738,9 +825,26 @@ end
     end
 end
 
-# Optimized: Zero-allocation write for 64-bit values
+# Optimized: Zero-allocation write for 64-bit values - direct word write
 @inline function write_u64_fast(state::PVMState, addr::UInt64, val::UInt64)
     @inbounds begin
+        addr32 = UInt32(addr & 0xFFFFFFFF)
+        mem = state.memory
+
+        # Single region check for entire 8-byte word (only writable regions)
+        rw = mem.rw_region
+        if addr32 >= rw.base && addr32 + 7 < rw.limit
+            region_write_u64!(rw.data, Int(addr32 - rw.base + 1), val)
+            return
+        end
+
+        stack = mem.stack_region
+        if addr32 >= stack.base && addr32 + 7 < stack.limit
+            region_write_u64!(stack.data, Int(addr32 - stack.base + 1), val)
+            return
+        end
+
+        # Fallback to two 32-bit writes
         write_u32_fast(state, addr, UInt32(val & 0xFFFFFFFF))
         state.status != CONTINUE && return
         write_u32_fast(state, addr + 4, UInt32((val >> 32) & 0xFFFFFFFF))
@@ -991,10 +1095,72 @@ end
             state.registers[ra + 1] = UInt64(state.registers[rb + 1] << shift)
             state.pc += 1 + skip
 
+        elseif opcode == 0xab  # 171: branch_ne (12.9%)
+            ra = get_register_index(state, 1, 0)
+            rb = get_register_index(state, 1, 1)
+            lx = min(4, max(0, skip - 1))
+            offset = decode_offset(state, 2, lx)
+            if state.registers[ra + 1] != state.registers[rb + 1]
+                state.pc = UInt32((Int64(state.pc) + offset) & 0xFFFFFFFF)
+            else
+                state.pc += 1 + skip
+            end
+
+        elseif opcode == 0x78  # 120: store_ind_u8 (12.8%)
+            ra = get_register_index(state, 1, 0)
+            rb = get_register_index(state, 1, 1)
+            lx = min(4, max(0, skip - 1))
+            immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
+            write_u8(state, state.registers[rb + 1] + immx, UInt8(state.registers[ra + 1] & 0xFF))
+            state.pc += 1 + skip
+
+        elseif opcode == 0xd4  # 212: or (3.4%)
+            ra = get_register_index(state, 1, 0)
+            rb = get_register_index(state, 1, 1)
+            rd = get_register_index(state, 2, 0)
+            state.registers[rd + 1] = state.registers[ra + 1] | state.registers[rb + 1]
+            state.pc += 1 + skip
+
+        elseif opcode == 0x81  # 129: load_ind_i32 (3.3%)
+            ra = get_register_index(state, 1, 0)
+            rb = get_register_index(state, 1, 1)
+            lx = min(4, max(0, skip - 1))
+            immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
+            addr = state.registers[rb + 1] + immx
+            val = read_u32_fast(state, addr)
+            state.registers[ra + 1] = sign_extend_32(val)
+            state.pc += 1 + skip
+
+        elseif opcode == 0x7a  # 122: store_ind_u32 (3.2%)
+            ra = get_register_index(state, 1, 0)
+            rb = get_register_index(state, 1, 1)
+            lx = min(4, max(0, skip - 1))
+            immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
+            write_u32_fast(state, state.registers[rb + 1] + immx, UInt32(state.registers[ra + 1] % 2^32))
+            state.pc += 1 + skip
+
+        elseif opcode == 0x8b  # 139: shlo_r_imm_32 (3.2%)
+            ra = get_register_index(state, 1, 0)
+            rb = get_register_index(state, 1, 1)
+            lx = min(4, max(0, skip - 1))
+            immx = decode_immediate(state, 2, lx)
+            shift = immx % 32
+            result = UInt32((state.registers[rb + 1] % 2^32) >> shift)
+            state.registers[ra + 1] = sign_extend_32(result)
+            state.pc += 1 + skip
+
         else
             # COLD PATH: all other opcodes via execute_instruction!
             execute_instruction_cold!(state, opcode, skip)
         end
+    end
+end
+
+# Bulk step function - runs many steps before returning, reduces call overhead
+function step_n!(state::PVMState, n::Int)
+    @inbounds for _ in 1:n
+        state.status != CONTINUE && return
+        step!(state)
     end
 end
 

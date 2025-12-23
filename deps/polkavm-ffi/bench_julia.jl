@@ -98,10 +98,24 @@ fb_callback = function(pvm_state, fb_addr, fb_size)
 end
 set_framebuffer_callback!(corevm, fb_callback)
 
+# warmup phase for JIT compilation
+println("warming up (20 frames)...")
+while frame_count < 20 && state.gas > 0
+    PVM.step!(state)
+    if state.status == PVM.HOST
+        handled = handle_corevm_host_call!(state, corevm)
+        if handled
+            skip = PVM.skip_distance(state.opcode_mask, Int(state.pc) + 1)
+            state.pc = state.pc + 1 + skip
+        end
+    end
+end
+
 println("running benchmark (100 frames)...")
+frame_start = frame_count
 start = time()
 
-while frame_count < 100 && state.gas > 0
+while frame_count < frame_start + 100 && state.gas > 0
     PVM.step!(state)
 
     if state.status == PVM.HOST
@@ -120,5 +134,6 @@ while frame_count < 100 && state.gas > 0
 end
 
 elapsed = time() - start
-fps = frame_count / elapsed
-println("rendered $frame_count frames in $(round(elapsed, digits=2))s = $(round(fps, digits=2)) fps")
+frames = frame_count - frame_start
+fps = frames / elapsed
+println("rendered $frames frames in $(round(elapsed, digits=2))s = $(round(fps, digits=2)) fps")
