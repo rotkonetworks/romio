@@ -632,7 +632,6 @@ end
 
         # No access
         state.status = FAULT
-        state.gas -= 1
         return UInt8(0)
     end
 end
@@ -672,13 +671,11 @@ end
         ro = mem.ro_region
         if addr32 >= ro.base && addr32 < ro.limit
             state.status = FAULT
-            state.gas -= 1
             return
         end
 
         # No access
         state.status = FAULT
-        state.gas -= 1
     end
 end
 
@@ -864,6 +861,65 @@ end
     return result
 end
 
+# Optimized bulk memory read - reads directly from flat regions without per-byte function calls
+# Returns a view into the underlying data array if possible (zero-copy for contiguous regions)
+# For sparse memory (heap), reads page-by-page which is much faster than per-byte
+function read_bytes_bulk(state::PVMState, addr::UInt64, len::Int)::Vector{UInt8}
+    addr32 = UInt32(addr & 0xFFFFFFFF)
+    end_addr = addr32 + UInt32(len) - 1
+    mem = state.memory
+
+    # Try RO region
+    ro = mem.ro_region
+    if addr32 >= ro.base && end_addr < ro.limit
+        start_idx = Int(addr32 - ro.base + 1)
+        return ro.data[start_idx:start_idx + len - 1]
+    end
+
+    # Try RW region
+    rw = mem.rw_region
+    if addr32 >= rw.base && end_addr < rw.limit
+        start_idx = Int(addr32 - rw.base + 1)
+        return rw.data[start_idx:start_idx + len - 1]
+    end
+
+    # Try stack region
+    stack = mem.stack_region
+    if addr32 >= stack.base && end_addr < stack.limit
+        start_idx = Int(addr32 - stack.base + 1)
+        return stack.data[start_idx:start_idx + len - 1]
+    end
+
+    # Sparse memory (heap) - read page by page for efficiency
+    result = Vector{UInt8}(undef, len)
+    remaining = len
+    dst_offset = 1
+    current_addr = addr32
+
+    @inbounds while remaining > 0
+        page_num = current_addr >> PAGE_BITS
+        page_offset = Int(current_addr & PAGE_MASK)
+        bytes_in_page = min(remaining, PAGE_SIZE - page_offset)
+
+        page = get(mem.sparse.pages, page_num, nothing)
+        if page !== nothing
+            # Copy from existing page
+            copyto!(result, dst_offset, page, page_offset + 1, bytes_in_page)
+        else
+            # Page not allocated - fill with zeros
+            for i in 0:bytes_in_page-1
+                result[dst_offset + i] = 0x00
+            end
+        end
+
+        current_addr += UInt32(bytes_in_page)
+        dst_offset += bytes_in_page
+        remaining -= bytes_in_page
+    end
+
+    return result
+end
+
 # Optimized: inline loop for small writes (kept for variable-length writes)
 @inline function write_bytes(state::PVMState, addr::UInt64, data::Vector{UInt8})
     # Disabled stack frame tracing
@@ -1035,7 +1091,7 @@ end
             immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
             addr = state.registers[rb + 1] + immx
             state.registers[ra + 1] = UInt64(read_u8(state, addr))
-            state.pc += 1 + skip
+            state.status == CONTINUE && (state.pc += 1 + skip)
 
         elseif opcode == 0x82  # 130: load_indirect_u64 (9.7%)
             ra = get_register_index(state, 1, 0)
@@ -1044,7 +1100,7 @@ end
             immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
             addr = state.registers[rb + 1] + immx
             state.registers[ra + 1] = read_u64_fast(state, addr)
-            state.pc += 1 + skip
+            state.status == CONTINUE && (state.pc += 1 + skip)
 
         # NOTE: 0x51 (81) removed from hot path - it's branch_eq_imm not branch_ne
         # The cold path handles it correctly
@@ -1055,7 +1111,7 @@ end
             lx = min(4, max(0, skip - 1))
             immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
             write_u64_fast(state, state.registers[rb + 1] + immx, state.registers[ra + 1])
-            state.pc += 1 + skip
+            state.status == CONTINUE && (state.pc += 1 + skip)
 
         elseif opcode == 0x64  # 100: move_reg (4.9%)
             ra = get_register_index(state, 1, 0)
@@ -1073,8 +1129,8 @@ end
             immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
             addr = state.registers[rb + 1] + immx
             val = read_u32_fast(state, addr)
-            state.registers[ra + 1] = sign_extend_32(val)
-            state.pc += 1 + skip
+            state.registers[ra + 1] = UInt64(val)  # zero-extend for unsigned load
+            state.status == CONTINUE && (state.pc += 1 + skip)
 
         elseif opcode == 0xaa  # 170: branch_eq (3.6%)
             ra = get_register_index(state, 1, 0)
@@ -1112,7 +1168,7 @@ end
             lx = min(4, max(0, skip - 1))
             immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
             write_u8(state, state.registers[rb + 1] + immx, UInt8(state.registers[ra + 1] & 0xFF))
-            state.pc += 1 + skip
+            state.status == CONTINUE && (state.pc += 1 + skip)
 
         elseif opcode == 0xd4  # 212: or (3.4%)
             ra = get_register_index(state, 1, 0)
@@ -1129,7 +1185,7 @@ end
             addr = state.registers[rb + 1] + immx
             val = read_u32_fast(state, addr)
             state.registers[ra + 1] = sign_extend_32(val)
-            state.pc += 1 + skip
+            state.status == CONTINUE && (state.pc += 1 + skip)
 
         elseif opcode == 0x7a  # 122: store_ind_u32 (3.2%)
             ra = get_register_index(state, 1, 0)
@@ -1137,7 +1193,7 @@ end
             lx = min(4, max(0, skip - 1))
             immx = sign_extend_imm(decode_immediate(state, 2, lx), lx)
             write_u32_fast(state, state.registers[rb + 1] + immx, UInt32(state.registers[ra + 1] % 2^32))
-            state.pc += 1 + skip
+            state.status == CONTINUE && (state.pc += 1 + skip)
 
         elseif opcode == 0x8b  # 139: shlo_r_imm_32 (3.2%)
             ra = get_register_index(state, 1, 0)
@@ -1246,21 +1302,21 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
-        immy = decode_immediate(state, 2 + lx, ly)
+        immy = decode_immediate_signed(state, 2 + lx, ly)
         write_u16_fast(state, immx, UInt16(immy % 2^16))
-        
+
     elseif opcode == 32  # store_imm_u32
         lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
-        immy = decode_immediate(state, 2 + lx, ly)
+        immy = decode_immediate_signed(state, 2 + lx, ly)
         write_u32_fast(state, immx, UInt32(immy % 2^32))
 
     elseif opcode == 33  # store_imm_u64
         lx = Int(min(4, state.instructions[state.pc + 2] % 8))
         ly = min(4, max(0, skip - lx - 1))
         immx = decode_immediate(state, 2, lx)
-        immy = decode_immediate(state, 2 + lx, ly)
+        immy = decode_immediate_signed(state, 2 + lx, ly)
         write_u64_fast(state, immx, immy)
         
     elseif opcode == 40  # jump
@@ -1897,6 +1953,7 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
+        immx = sign_extend_imm(immx, lx)  # sign-extend immediate to 32 bits
         shift = state.registers[rb + 1] % 32
         result = UInt32((immx << shift) % 2^32)
         state.registers[ra + 1] = sign_extend_32(result)
@@ -1906,6 +1963,7 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
+        immx = sign_extend_imm(immx, lx)  # sign-extend immediate to 32 bits
         shift = state.registers[rb + 1] % 32
         result = UInt32((immx % 2^32) >> shift)
         state.registers[ra + 1] = sign_extend_32(result)
@@ -1915,6 +1973,7 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         rb = get_register_index(state, 1, 1)
         lx = min(4, max(0, skip - 1))
         immx = decode_immediate(state, 2, lx)
+        immx = sign_extend_imm(immx, lx)  # sign-extend immediate to 32 bits
         shift = state.registers[rb + 1] % 32
         val = reinterpret(Int32, UInt32(immx % 2^32))
         result = val >> shift
@@ -2395,12 +2454,6 @@ function execute_instruction_impl!(state::PVMState, opcode::UInt8, skip::Int)
         state.registers[rd + 1] = min(state.registers[ra + 1], state.registers[rb + 1])
         
     # three register operations (190-230)
-    elseif opcode == 0xBE && state.pc == 11  # Special case: ecalli at PC=11
-        # At PC=11 we should have ecalli 0
-        state.status = HOST
-        state.registers[1] = 0  # host call id 0
-        state.pc += 1  # Move past the ecalli
-
     elseif opcode == 190  # add_32
         ra = get_register_index(state, 1, 0)
         rb = get_register_index(state, 1, 1)
