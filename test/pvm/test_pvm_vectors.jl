@@ -163,6 +163,9 @@ function create_test_state(
 
     instructions, opcode_mask, jump_table = result
 
+    # Precompute skip distances from opcode mask
+    skip_distances = PVM.precompute_skip_distances(opcode_mask)
+
     # Create memory
     memory = PVM.Memory()
 
@@ -198,6 +201,7 @@ function create_test_state(
         initial_gas,          # gas
         instructions,         # instructions
         opcode_mask,          # opcode_mask
+        skip_distances,       # skip_distances
         copy(initial_regs),   # registers (copy to avoid mutation)
         memory,               # memory
         jump_table,           # jump_table
