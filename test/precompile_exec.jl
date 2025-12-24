@@ -5,6 +5,10 @@ using JAM
 
 println("Precompilation: exercising JAM module...")
 
+# PVM interpreter precompilation
+println("Precompiling PVM interpreter...")
+include(joinpath(@__DIR__, "precompile_pvm.jl"))
+
 # Exercise STF code paths for JIT precompilation
 let stf_base = "jam-test-vectors/stf"
     # Run one test from each STF module to trigger JIT compilation
