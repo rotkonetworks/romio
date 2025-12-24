@@ -1,15 +1,9 @@
 # PVM precompilation workload for PackageCompiler
 # exercises interpreter hot paths using benchmark-style execution
 
-const PROJECT_DIR = dirname(dirname(@__FILE__))
-include(joinpath(PROJECT_DIR, "src/pvm/pvm.jl"))
-using .PVM
-
-include(joinpath(PROJECT_DIR, "src/pvm/polkavm_blob.jl"))
-using .PolkaVMBlob
-
-include(joinpath(PROJECT_DIR, "src/pvm/corevm_extension.jl"))
-using .CoreVMExtension
+using JAM
+using JAM: PVM, PolkaVMBlob, CoreVMExtension
+using .PVM, .PolkaVMBlob, .CoreVMExtension
 
 println("Precompiling PVM interpreter...")
 
@@ -19,7 +13,6 @@ const DOOM_PATHS = [
     "/tmp/polkajam-nightly-2025-12-15-linux-x86_64/doom.corevm",
     "/tmp/polkajam-v0.1.27-linux-x86_64/doom.corevm",
     expanduser("~/doom.corevm"),
-    joinpath(PROJECT_DIR, "doom.corevm"),
 ]
 
 function find_doom_corevm()

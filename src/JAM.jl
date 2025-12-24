@@ -41,6 +41,11 @@ include("blocks/blocks.jl")
 # state transition
 include("state/transition.jl")
 
+# pvm interpreter
+include("pvm/pvm.jl")
+include("pvm/polkavm_blob.jl")
+include("pvm/corevm_extension.jl")
+
 # exports
 export State, Block, Header
 export ServiceAccount, WorkPackage, WorkReport
