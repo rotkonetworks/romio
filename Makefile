@@ -1,4 +1,4 @@
-.PHONY: all deps build sysimage test clean
+.PHONY: all deps build sysimage app test clean
 
 all: deps sysimage
 
@@ -8,6 +8,9 @@ deps:
 
 sysimage: deps
 	julia --project=. build/build_app.jl
+
+app: deps
+	julia --project=. build/build_app.jl --app
 
 test: deps
 	julia --project=. -e 'using Pkg; Pkg.test()'
