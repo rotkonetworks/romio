@@ -636,6 +636,61 @@ end
     end
 end
 
+# Bulk read for framebuffer - reads contiguous bytes into dest array
+# Returns number of bytes read (may be less if crosses region boundary)
+function read_bytes!(state::PVMState, addr::UInt32, dest::Vector{UInt8}, n::Int)
+    mem = state.memory
+
+    # Check sparse (heap) first since framebuffer is typically there
+    page_num = addr >> PAGE_BITS
+    page = get(mem.sparse.pages, page_num, nothing)
+    if page !== nothing
+        # Read from sparse page - may span multiple pages
+        offset = Int(addr & PAGE_MASK) + 1
+        avail = PAGE_SIZE - offset + 1
+        if avail >= n
+            @inbounds copyto!(dest, 1, page, offset, n)
+            return n
+        else
+            # Spans pages - read what we can from first page
+            @inbounds copyto!(dest, 1, page, offset, avail)
+            # Read rest from subsequent pages
+            remaining = n - avail
+            dest_offset = avail + 1
+            next_addr = addr + UInt32(avail)
+            while remaining > 0
+                next_page_num = next_addr >> PAGE_BITS
+                next_page = get(mem.sparse.pages, next_page_num, nothing)
+                if next_page === nothing
+                    break
+                end
+                chunk = min(remaining, PAGE_SIZE)
+                @inbounds copyto!(dest, dest_offset, next_page, 1, chunk)
+                remaining -= chunk
+                dest_offset += chunk
+                next_addr += UInt32(chunk)
+            end
+            return n - remaining
+        end
+    end
+
+    # Try RW region
+    rw = mem.rw_region
+    if addr >= rw.base && addr < rw.limit
+        offset = Int(addr - rw.base) + 1
+        avail = Int(rw.limit - addr)
+        count = min(n, avail)
+        @inbounds copyto!(dest, 1, rw.data, offset, count)
+        return count
+    end
+
+    # Fallback to byte-by-byte (shouldn't happen for framebuffer)
+    for i in 1:n
+        dest[i] = read_u8(state, UInt64(addr + i - 1))
+    end
+    return n
+end
+
 @inline function write_u8(state::PVMState, addr::UInt64, val::UInt8)
     @inbounds begin
         addr32 = UInt32(addr & 0xFFFFFFFF)
@@ -2587,11 +2642,15 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
     # Empty context for now - will be populated when integrating with work packages
     context = nothing
     invocation_type = :refine  # Default to refine for testing
+    batch_size = 10000  # batch stepping for ~10x performance improvement
 
     while state.gas > 0
         if state.status == CONTINUE
-            step!(state)
-        elseif state.status == HOST
+            # batch execute for performance - stops on HOST/HALT/PANIC/OOG/FAULT
+            step_n!(state, batch_size)
+        end
+
+        if state.status == HOST
             # Save PC before host call
             pc_before = state.pc
 
@@ -2603,20 +2662,11 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64)
             if state.status == HOST
                 state.status = CONTINUE
                 # Advance PC past ecalli instruction
-                # ecalli format: opcode (1 byte) + immediate (skip bytes)
                 skip = skip_distance(state.opcode_mask, pc_before + 1)
                 new_pc = pc_before + 1 + skip
-                if host_call_id == 100
-                    println("      [PC ADVANCE] pc_before=0x$(string(pc_before, base=16)), skip=$skip, new_pc=0x$(string(new_pc, base=16))")
-                    if new_pc < length(state.instructions)
-                        println("      [NEXT INSTR] opcode at new_pc: 0x$(string(state.instructions[new_pc + 1], base=16))")
-                    else
-                        println("      [NEXT INSTR] new_pc beyond code! code_len=$(length(state.instructions))")
-                    end
-                end
                 state.pc = new_pc
             end
-        else
+        elseif state.status != CONTINUE
             # HALT, PANIC, OOG, FAULT - stop execution
             break
         end
@@ -2716,6 +2766,7 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
     invocation_type = :accumulate  # Set to accumulate for accumulate context
     step_count = 0
     max_steps = 100000000  # 100M step limit for safety
+    batch_size = 10000  # batch stepping for ~10x performance improvement
 
     while state.gas > 0 && step_count < max_steps
         # Debug trace - print every instruction for first 60 steps
@@ -2746,24 +2797,24 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
                     end
                 end
             end
+            # single step in debug mode
+            if state.status == CONTINUE
+                step!(state)
+                step_count += 1
+            end
+        elseif state.status == CONTINUE
+            # batch execute for performance - stops on HOST/HALT/PANIC/OOG/FAULT
+            step_n!(state, batch_size)
+            step_count += batch_size
         end
-        if state.status == CONTINUE
-            step!(state)
-            step_count += 1
-        elseif state.status == HOST
+
+        if state.status == HOST
             # Save PC before host call
             pc_before = state.pc
 
             # Handle host call with provided context
             host_call_id = Int(state.host_call_id)
-            # Log ALL host calls to catch any failures
-            # if host_call_id != 1  # Skip FETCH logging (already logged separately)
-            #     println("      [HOST CALL] step=$step_count, id=$host_call_id, PC=0x$(string(pc_before, base=16)), r7=$(state.registers[8]), r8=$(state.registers[9]), r9=$(state.registers[10]), r10=$(state.registers[11])")
-            # end
             state = HostCalls.dispatch_host_call(host_call_id, state, context, invocation_type)
-            # if host_call_id != 1
-            #     println("      [HOST CALL AFTER] step=$step_count, id=$host_call_id, status=$(state.status), r7=$(state.registers[8])")
-            # end
 
             # Resume execution if no error
             if state.status == HOST
@@ -2771,23 +2822,11 @@ function execute(program::Vector{UInt8}, input::Vector{UInt8}, gas::UInt64, cont
                 # Advance PC past ecalli instruction
                 skip = skip_distance(state.opcode_mask, pc_before + 1)
                 new_pc = pc_before + 1 + skip
-                if host_call_id == 100
-                    println("      [PC ADVANCE] pc_before=0x$(string(pc_before, base=16)), skip=$skip, new_pc=0x$(string(new_pc, base=16))")
-                    if new_pc < length(state.instructions)
-                        println("      [NEXT INSTR] opcode at new_pc: 0x$(string(state.instructions[new_pc + 1], base=16))")
-                    else
-                        println("      [NEXT INSTR] new_pc beyond code! code_len=$(length(state.instructions))")
-                    end
-                end
                 state.pc = new_pc
             end
-        else
+        elseif state.status != CONTINUE
             # HALT, PANIC, OOG, FAULT - stop execution
             break
-        end
-
-        if step_count == 936
-            println("      [END OF ITERATION 936] status=$(state.status), gas=$(state.gas)")
         end
     end
 
