@@ -200,6 +200,14 @@ mutable struct RPCServer
     clients::Dict{UInt64, Any}
     running::Bool
     next_client_id::UInt64
+    # Track finalized block subscriptions: sub_id => client_id
+    finalized_block_subs::Dict{Int64, UInt64}
+    # Track best block subscriptions: sub_id => client_id
+    best_block_subs::Dict{Int64, UInt64}
+    # Track service request subscriptions: sub_id => (client_id, service_id, hash, len)
+    service_request_subs::Dict{Int64, Tuple{UInt64, UInt32, Vector{UInt8}, Int}}
+    # Track service value subscriptions: sub_id => (client_id, service_id, key, finalized)
+    service_value_subs::Dict{Int64, Tuple{UInt64, UInt32, Vector{UInt8}, Bool}}
 end
 
 function RPCServer(; host::String="::", port::UInt16=UInt16(19800), chain_state::ChainState=MockChainState())
@@ -211,7 +219,11 @@ function RPCServer(; host::String="::", port::UInt16=UInt16(19800), chain_state:
         nothing,
         Dict{UInt64, Any}(),
         false,
-        1
+        1,
+        Dict{Int64, UInt64}(),  # finalized_block_subs
+        Dict{Int64, UInt64}(),  # best_block_subs
+        Dict{Int64, Tuple{UInt64, UInt32, Vector{UInt8}, Int}}(),  # service_request_subs
+        Dict{Int64, Tuple{UInt64, UInt32, Vector{UInt8}, Bool}}()  # service_value_subs
     )
     register_default_handlers!(server)
     return server
@@ -271,6 +283,8 @@ function register_default_handlers!(server::RPCServer)
     register_handler!(server, "unsubscribeWorkPackageStatus", (s, p) -> rpc_unsubscribe(s, p))
     register_handler!(server, "subscribeSyncStatus", (s, p) -> rpc_subscribe_sync_status(s, p))
     register_handler!(server, "unsubscribeSyncStatus", (s, p) -> rpc_unsubscribe(s, p))
+    register_handler!(server, "subscribeServiceRequest", (s, p) -> rpc_subscribe_service_request(s, p))
+    register_handler!(server, "unsubscribeServiceRequest", (s, p) -> rpc_unsubscribe(s, p))
 end
 
 # ===== RPC Method Implementations =====
@@ -399,9 +413,21 @@ function rpc_fetch_segments(server::RPCServer, params::Vector{Any})
 end
 
 function rpc_submit_preimage(server::RPCServer, params::Vector{Any})
-    length(params) < 2 && throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters", nothing))
-    # TODO: Implement preimage submission
-    return nothing
+    # Format: [service_id, data_base64]
+    length(params) < 2 && throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters for submitPreimage", nothing))
+
+    service_id = UInt32(params[1])
+    data = base64decode(params[2])
+    data_len = length(data)
+
+    println("submitPreimage: service=$(service_id), len=$(data_len)")
+
+    # Store in submitted_preimages for the testnet to process
+    push!(server.chain_state.submitted_preimages, (service_id, data))
+    println("  Queued $(data_len) bytes for service $(service_id)")
+
+    # Return true to indicate success (matches polkajam behavior)
+    return true
 end
 
 function rpc_sync_state(server::RPCServer, params::Vector{Any})
@@ -413,8 +439,10 @@ end
 
 # Subscription handlers (return subscription ID)
 function rpc_subscribe_best_block(server::RPCServer, params::Vector{Any})
-    # TODO: Create actual subscription
-    return 1
+    # Generate a subscription ID
+    sub_id = rand(Int64) & 0x7FFFFFFFFFFFFFFF  # Positive int64
+    # Mark that this subscription needs a notification to be sent
+    return (sub_id, :best_block_notification)
 end
 
 function rpc_subscribe_finalized_block(server::RPCServer, params::Vector{Any})
@@ -433,7 +461,22 @@ function rpc_subscribe_service_data(server::RPCServer, params::Vector{Any})
 end
 
 function rpc_subscribe_service_value(server::RPCServer, params::Vector{Any})
-    return 1
+    # jamt calls this to monitor when service storage values change
+    # Format: [service_id, key (base64), finalized]
+    if length(params) < 3
+        throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters for subscribeServiceValue", nothing))
+    end
+    service_id = UInt32(params[1])
+    key = base64decode(params[2])
+    finalized = Bool(params[3])
+
+    # Generate subscription ID
+    sub_id = rand(Int64) & 0x7FFFFFFFFFFFFFFF  # Positive int64
+
+    println("subscribeServiceValue: service=$(service_id), key=$(bytes2hex(key[1:min(8, length(key))]))..., finalized=$(finalized)")
+
+    # Return (sub_id, notification_type, service_id, key, finalized) for storage
+    return (sub_id, :service_value_notification, service_id, key, finalized)
 end
 
 function rpc_subscribe_wp_status(server::RPCServer, params::Vector{Any})
@@ -448,9 +491,33 @@ function rpc_subscribe_sync_status(server::RPCServer, params::Vector{Any})
     return (sub_id, :sync_status_notification)
 end
 
+function rpc_subscribe_service_request(server::RPCServer, params::Vector{Any})
+    # jamt calls this to monitor when service request data is available
+    # Format: [service_id, hash (base64), len, finalized]
+    if length(params) < 3
+        throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters for subscribeServiceRequest", nothing))
+    end
+    service_id = UInt32(params[1])
+    preimage_hash = base64decode(params[2])
+    preimage_len = Int(params[3])
+
+    # Generate subscription ID
+    sub_id = rand(Int64) & 0x7FFFFFFFFFFFFFFF  # Positive int64
+
+    # Return (sub_id, notification_type, service_id, hash, len) for storage
+    return (sub_id, :service_request_notification, service_id, preimage_hash, preimage_len)
+end
+
 function rpc_unsubscribe(server::RPCServer, params::Vector{Any})
     length(params) < 1 && throw(RPCError(ERR_INVALID_PARAMS, "Missing subscription ID", nothing))
-    # TODO: Remove subscription
+    sub_id = params[1]
+
+    # Remove from all subscription dicts
+    delete!(server.finalized_block_subs, sub_id)
+    delete!(server.best_block_subs, sub_id)
+    delete!(server.service_request_subs, sub_id)
+    delete!(server.service_value_subs, sub_id)
+
     return true
 end
 
@@ -521,24 +588,26 @@ end
 
 # ===== WebSocket Handling =====
 
-function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client_id::UInt64)::Vector{Vector{UInt8}}
+function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client_id::UInt64)
     try
         request = JSON.parse(String(data))
 
         # Handle batch requests
         if isa(request, AbstractVector)
             responses = [process_request(server, req, client_id) for req in request]
-            return [Vector{UInt8}(JSON.json(responses))]
+            return Vector{UInt8}[Vector{UInt8}(JSON.json(responses))]
         else
             response = process_request(server, request, client_id)
-            frames = [Vector{UInt8}(JSON.json(response))]
 
-            # Check if result needs a follow-up notification
-            if haskey(response, "result") && isa(response["result"], Tuple)
-                sub_id, notification_type = response["result"]
-                # Fix the response to only contain the subscription ID
+            # Check if result needs a follow-up notification (before creating frames)
+            frames = Vector{UInt8}[]  # Use properly typed vector
+            if haskey(response, "result") && isa(response["result"], Tuple) && length(response["result"]) >= 2
+                result_tuple = response["result"]
+                sub_id = result_tuple[1]
+                notification_type = result_tuple[2]
+                # Fix the response to only contain the subscription ID BEFORE serializing
                 response["result"] = sub_id
-                frames[1] = Vector{UInt8}(JSON.json(response))
+                push!(frames, Vector{UInt8}(JSON.json(response)))
 
                 # Add notification frame based on type
                 if notification_type == :sync_status_notification
@@ -553,6 +622,8 @@ function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client
                     )
                     push!(frames, Vector{UInt8}(JSON.json(notification)))
                 elseif notification_type == :finalized_block_notification
+                    # Store the subscription for future updates
+                    server.finalized_block_subs[sub_id] = client_id
                     # Send finalized block notification with the current finalized block
                     finalized = server.chain_state.finalized_block
                     notification = Dict{String, Any}(
@@ -564,7 +635,63 @@ function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client
                         )
                     )
                     push!(frames, Vector{UInt8}(JSON.json(notification)))
+                elseif notification_type == :best_block_notification
+                    # Store the subscription for future updates
+                    server.best_block_subs[sub_id] = client_id
+                    # Send best block notification with the current best block
+                    best = server.chain_state.best_block
+                    notification = Dict{String, Any}(
+                        "jsonrpc" => "2.0",
+                        "method" => "subscribeBestBlock",
+                        "params" => Dict{String, Any}(
+                            "subscription" => sub_id,
+                            "result" => block_descriptor_to_json(best)
+                        )
+                    )
+                    push!(frames, Vector{UInt8}(JSON.json(notification)))
+                elseif notification_type == :service_request_notification
+                    # jamt subscribes to service request availability
+                    # Extract subscription parameters from extended tuple
+                    if length(result_tuple) >= 5
+                        service_id = result_tuple[3]
+                        preimage_hash = result_tuple[4]
+                        preimage_len = result_tuple[5]
+                        server.service_request_subs[sub_id] = (client_id, service_id, preimage_hash, preimage_len)
+                        println("Registered service request subscription: sub_id=$(sub_id), service=$(service_id), hash=$(bytes2hex(preimage_hash[1:min(8, length(preimage_hash))]))..., len=$(preimage_len)")
+                    end
+                    # Don't send immediate notification - wait for preimage availability
+                elseif notification_type == :service_value_notification
+                    # jamt subscribes to service value changes (e.g. new service created)
+                    # Extract subscription parameters from extended tuple
+                    if length(result_tuple) >= 5
+                        service_id = result_tuple[3]
+                        key = result_tuple[4]
+                        finalized = result_tuple[5]
+                        server.service_value_subs[sub_id] = (client_id, service_id, key, finalized)
+                        println("Registered service value subscription: sub_id=$(sub_id), service=$(service_id), key=$(bytes2hex(key[1:min(8, length(key))]))..., finalized=$(finalized)")
+
+                        # JIP-2 requires sending an immediate notification with the current value
+                        # For a new subscription, the value is null (no service created yet)
+                        block = finalized ? server.chain_state.finalized_block : server.chain_state.best_block
+                        initial_notification = Dict{String, Any}(
+                            "jsonrpc" => "2.0",
+                            "method" => "subscribeServiceValue",
+                            "params" => Dict{String, Any}(
+                                "subscription" => sub_id,
+                                "result" => Dict{String, Any}(
+                                    "header_hash" => base64encode(block.header_hash),
+                                    "slot" => block.slot,
+                                    "value" => nothing  # null - no value exists yet
+                                )
+                            )
+                        )
+                        push!(frames, Vector{UInt8}(JSON.json(initial_notification)))
+                        println("Sent initial subscribeServiceValue notification with value=null")
+                    end
                 end
+            else
+                # Non-tuple result, just serialize as-is
+                push!(frames, Vector{UInt8}(JSON.json(response)))
             end
 
             return frames
@@ -572,9 +699,9 @@ function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client
     catch e
         # Handle JSON parse errors (ArgumentError in newer JSON.jl)
         if isa(e, ArgumentError) || contains(string(typeof(e)), "Parser")
-            return [Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_PARSE, "Parse error")))]
+            return Vector{UInt8}[Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_PARSE, "Parse error")))]
         end
-        return [Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_INTERNAL, string(e))))]
+        return Vector{UInt8}[Vector{UInt8}(JSON.json(make_error_response(nothing, ERR_INTERNAL, string(e))))]
     end
 end
 
@@ -785,11 +912,156 @@ function broadcast_notification(server::RPCServer, method::String, params::Dict{
 end
 
 function notify_block_update(server::RPCServer, method::String, block::BlockDescriptor)
-    params = Dict{String, Any}(
-        "subscription" => 1,  # TODO: Track actual subscription IDs
-        "result" => block_descriptor_to_json(block)
-    )
-    broadcast_notification(server, method, params)
+    # Only handle finalized block notifications for now
+    if method == "subscribeFinalizedBlock"
+        block_json = block_descriptor_to_json(block)
+        for (sub_id, client_id) in server.finalized_block_subs
+            if haskey(server.clients, client_id)
+                notification = Dict{String, Any}(
+                    "jsonrpc" => "2.0",
+                    "method" => method,
+                    "params" => Dict{String, Any}(
+                        "subscription" => sub_id,
+                        "result" => block_json
+                    )
+                )
+                try
+                    write_websocket_frame(server.clients[client_id], Vector{UInt8}(JSON.json(notification)))
+                catch
+                    # Client disconnected, remove subscription
+                    delete!(server.finalized_block_subs, sub_id)
+                end
+            else
+                # Client gone, remove subscription
+                delete!(server.finalized_block_subs, sub_id)
+            end
+        end
+    elseif method == "subscribeBestBlock"
+        # Only notify clients that subscribed to best block updates
+        block_json = block_descriptor_to_json(block)
+        for (sub_id, client_id) in server.best_block_subs
+            if haskey(server.clients, client_id)
+                notification = Dict{String, Any}(
+                    "jsonrpc" => "2.0",
+                    "method" => method,
+                    "params" => Dict{String, Any}(
+                        "subscription" => sub_id,
+                        "result" => block_json
+                    )
+                )
+                try
+                    write_websocket_frame(server.clients[client_id], Vector{UInt8}(JSON.json(notification)))
+                catch
+                    # Client disconnected, remove subscription
+                    delete!(server.best_block_subs, sub_id)
+                end
+            else
+                # Client gone, remove subscription
+                delete!(server.best_block_subs, sub_id)
+            end
+        end
+    end
+end
+
+"""
+    notify_service_request(server, service_id, preimage_hash, preimage_len, slot_provided)
+
+Notify subscribers that a preimage is now available for the given service/hash/len.
+According to JIP-2, chain subscription notifications use Chain Subscription Update format:
+{header_hash: Hash, slot: Number, value: Array of Numbers}
+"""
+function notify_service_request(server::RPCServer, service_id::UInt32, preimage_hash::Vector{UInt8}, preimage_len::Int, slot_provided::UInt64)
+    subs_to_remove = Int64[]
+
+    # Get current best block info for Chain Subscription Update format
+    best_block = server.chain_state.best_block
+
+    for (sub_id, (client_id, sub_service_id, sub_hash, sub_len)) in server.service_request_subs
+        # Check if this subscription matches
+        if sub_service_id == service_id && sub_hash == preimage_hash && sub_len == preimage_len
+            if haskey(server.clients, client_id)
+                # JIP-2: Chain Subscription Update format with header_hash, slot, value
+                notification = Dict{String, Any}(
+                    "jsonrpc" => "2.0",
+                    "method" => "subscribeServiceRequest",
+                    "params" => Dict{String, Any}(
+                        "subscription" => sub_id,
+                        "result" => Dict{String, Any}(
+                            "header_hash" => base64encode(best_block.header_hash),
+                            "slot" => best_block.slot,
+                            "value" => [slot_provided]  # Array with slot when provided
+                        )
+                    )
+                )
+                try
+                    write_websocket_frame(server.clients[client_id], Vector{UInt8}(JSON.json(notification)))
+                    println("Sent service request notification to sub $(sub_id): preimage available at slot $(slot_provided)")
+                catch e
+                    # Client disconnected
+                    push!(subs_to_remove, sub_id)
+                end
+            else
+                push!(subs_to_remove, sub_id)
+            end
+        end
+    end
+
+    # Clean up dead subscriptions
+    for sub_id in subs_to_remove
+        delete!(server.service_request_subs, sub_id)
+    end
+end
+
+"""
+    notify_service_value(server, service_id, key, new_value)
+
+Notify subscribers that a service storage value has changed.
+According to JIP-2, chain subscription notifications use Chain Subscription Update format:
+{header_hash: Hash, slot: Number, value: Array (the new value)}
+"""
+function notify_service_value(server::RPCServer, service_id::UInt32, key::Vector{UInt8}, new_value::Vector{UInt8}; is_finalized::Bool=false, block::Union{BlockDescriptor, Nothing}=nothing)
+    subs_to_remove = Int64[]
+
+    # Use provided block, or derive from is_finalized flag
+    if block === nothing
+        block = is_finalized ? server.chain_state.finalized_block : server.chain_state.best_block
+    end
+
+    for (sub_id, (client_id, sub_service_id, sub_key, sub_finalized)) in server.service_value_subs
+        # Check if this subscription matches AND finalized flag matches
+        if sub_service_id == service_id && sub_key == key && sub_finalized == is_finalized
+            if haskey(server.clients, client_id)
+                # JIP-2: subscribeServiceValue notification with header_hash, slot, value
+                # Note: value is BASE64-encoded bytes (jamt expects this format for serviceValue)
+                notification = Dict{String, Any}(
+                    "jsonrpc" => "2.0",
+                    "method" => "subscribeServiceValue",
+                    "params" => Dict{String, Any}(
+                        "subscription" => sub_id,
+                        "result" => Dict{String, Any}(
+                            "header_hash" => base64encode(block.header_hash),
+                            "slot" => block.slot,
+                            "value" => base64encode(new_value)  # BASE64-encoded bytes
+                        )
+                    )
+                )
+                try
+                    write_websocket_frame(server.clients[client_id], Vector{UInt8}(JSON.json(notification)))
+                    println("Sent service value notification (finalized=$(is_finalized)) to sub $(sub_id): service=$(service_id), key=$(bytes2hex(key[1:min(8, length(key))]))...")
+                catch e
+                    # Client disconnected
+                    push!(subs_to_remove, sub_id)
+                end
+            else
+                push!(subs_to_remove, sub_id)
+            end
+        end
+    end
+
+    # Clean up dead subscriptions
+    for sub_id in subs_to_remove
+        delete!(server.service_value_subs, sub_id)
+    end
 end
 
 end # module RPC
