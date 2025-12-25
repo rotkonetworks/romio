@@ -1,27 +1,11 @@
 #!/usr/bin/env julia
 # Doom player using pure Julia PVM interpreter with SDL display
-# Run from project root: julia --project=. src/pvm/doom_sdl.jl
+# Run from project root: julia -J build/romio.so --project=. src/pvm/doom_sdl.jl
 
-const PROJECT_DIR = dirname(dirname(dirname(@__FILE__)))
-pushfirst!(LOAD_PATH, PROJECT_DIR)
+using JAM: PVM, PolkaVMBlob, CoreVMExtension
 
-using Pkg
-Pkg.activate(PROJECT_DIR; io=devnull)
-
-# Include the PVM module
-include(joinpath(@__DIR__, "pvm.jl"))
-using .PVM
-
-# Include the PolkaVM blob parser (for .polkavm format)
-include(joinpath(@__DIR__, "polkavm_blob.jl"))
-using .PolkaVMBlob
-
-# Include the CoreVM extension
-include(joinpath(@__DIR__, "corevm_extension.jl"))
-using .CoreVMExtension
-
-# SDL2 via direct ccall (SimpleDirectMediaLayer has issues)
-using SDL2_jll
+# SDL2 via native system library
+const libsdl2 = "/usr/lib/libSDL2.so"
 
 const SDL_INIT_VIDEO = 0x00000020
 const SDL_WINDOW_SHOWN = 0x00000004
@@ -37,16 +21,10 @@ const FRAME_SIZE = WIDTH * HEIGHT * 3
 
 println("Loading Doom PVM (SDL display)...")
 
-# Load Doom corevm blob
-doom_paths = [
-    "/tmp/polkajam-nightly-2025-12-15-linux-x86_64/doom.corevm",
-    "/tmp/polkajam-v0.1.27-linux-x86_64/doom.corevm",
-    expanduser("~/doom.corevm"),
-    joinpath(PROJECT_DIR, "doom.corevm"),
-]
-
+# Load Doom corevm blob - find latest nightly
 doom_path = nothing
-for p in doom_paths
+for d in sort(filter(s -> startswith(s, "polkajam-nightly-"), readdir("/tmp")), rev=true)
+    p = joinpath("/tmp", d, "doom.corevm")
     if isfile(p)
         global doom_path = p
         break
@@ -54,7 +32,7 @@ for p in doom_paths
 end
 
 if doom_path === nothing
-    error("Doom corevm not found! Tried: $(join(doom_paths, ", "))")
+    error("Doom corevm not found! Install polkajam nightly to /tmp/")
 end
 
 println("Loading from: $doom_path")
@@ -79,7 +57,7 @@ println("PVM blob found at offset $(pvm_offset-1): $(length(pvm_blob)) bytes")
 
 # Parse using PolkaVM blob parser
 println("Parsing PVM blob...")
-prog = parse_polkavm_blob(pvm_blob)
+prog = PolkaVMBlob.parse_polkavm_blob(pvm_blob)
 
 println("  Code: $(length(prog.code)) bytes")
 println("  RO data: $(length(prog.ro_data)) bytes")
@@ -87,7 +65,7 @@ println("  RW data size: $(prog.rw_data_size) bytes")
 println("  Stack size: $(prog.stack_size) bytes")
 
 # Get opcode mask
-opcode_mask = get_opcode_mask(prog)
+opcode_mask = PolkaVMBlob.get_opcode_mask(prog)
 
 # Calculate memory layout
 const VM_MAX_PAGE_SIZE = UInt32(0x10000)
@@ -105,8 +83,8 @@ const STACK_LOW = UInt32(STACK_HIGH - prog.stack_size)
 const HEAP_BASE = UInt32(RW_BASE + prog.rw_data_size)
 
 # Create CoreVM extension
-corevm = CoreVMHostCalls(width=WIDTH, height=HEIGHT)
-set_heap_base!(corevm, HEAP_BASE)
+corevm = CoreVMExtension.CoreVMHostCalls(width=WIDTH, height=HEIGHT)
+CoreVMExtension.set_heap_base!(corevm, HEAP_BASE)
 
 # Calculate skip distances
 skip_distances = PVM.precompute_skip_distances(opcode_mask)
@@ -139,7 +117,7 @@ state = PVM.PVMState(
 
 # Initialize SDL
 println("Initializing SDL...")
-sdl = SDL2_jll.libsdl2
+sdl = libsdl2
 
 ret = ccall((:SDL_Init, sdl), Cint, (UInt32,), SDL_INIT_VIDEO)
 if ret != 0
@@ -187,32 +165,28 @@ mutable struct SDL_Event
     padding::NTuple{52, UInt8}
 end
 
+# Pre-allocate buffers for bulk read
+palette_buf = Vector{UInt8}(undef, 768)
+pixels_buf = Vector{UInt8}(undef, WIDTH * HEIGHT)
+
 # Set up framebuffer callback
 fb_callback = function(pvm_state, fb_addr, fb_size)
-    global frame_count, rgb_frame, texture, renderer, running
+    global frame_count, rgb_frame, texture, renderer, running, palette_buf, pixels_buf
 
     if fb_size >= 64769  # 1 + 768 + 64000
-        # Read palette + indexed pixels from PVM memory
-        for i in 0:WIDTH*HEIGHT-1
-            pixel_addr = fb_addr + 769 + i
-            if pixel_addr < 2^32
-                idx = PVM.read_u8(pvm_state, UInt64(pixel_addr))
-                if pvm_state.status != PVM.CONTINUE
-                    pvm_state.status = PVM.CONTINUE
-                end
-                base = Int(idx) * 3
-                if base + 2 < 768
-                    r = PVM.read_u8(pvm_state, UInt64(fb_addr + 1 + base))
-                    g = PVM.read_u8(pvm_state, UInt64(fb_addr + 2 + base))
-                    b = PVM.read_u8(pvm_state, UInt64(fb_addr + 3 + base))
-                    if pvm_state.status != PVM.CONTINUE
-                        pvm_state.status = PVM.CONTINUE
-                    end
-                    rgb_frame[i*3 + 1] = r
-                    rgb_frame[i*3 + 2] = g
-                    rgb_frame[i*3 + 3] = b
-                end
-            end
+        # Bulk read palette (768 bytes at fb_addr+1)
+        PVM.read_bytes!(pvm_state, UInt32(fb_addr + 1), palette_buf, 768)
+
+        # Bulk read indexed pixels (64000 bytes at fb_addr+769)
+        PVM.read_bytes!(pvm_state, UInt32(fb_addr + 769), pixels_buf, WIDTH * HEIGHT)
+
+        # Convert indexed to RGB using palette
+        @inbounds for i in 1:WIDTH*HEIGHT
+            idx = pixels_buf[i]
+            base = Int(idx) * 3
+            rgb_frame[(i-1)*3 + 1] = palette_buf[base + 1]
+            rgb_frame[(i-1)*3 + 2] = palette_buf[base + 2]
+            rgb_frame[(i-1)*3 + 3] = palette_buf[base + 3]
         end
 
         # Update texture
@@ -246,7 +220,7 @@ fb_callback = function(pvm_state, fb_addr, fb_size)
     end
 end
 
-set_framebuffer_callback!(corevm, fb_callback)
+CoreVMExtension.set_framebuffer_callback!(corevm, fb_callback)
 
 println("Running Doom with Julia interpreter!")
 println("Close the window or press Ctrl+C to quit.")
@@ -255,25 +229,23 @@ flush(stdout)
 try
     step_count = 0
     max_steps = 10_000_000_000
+    batch_size = 10000  # Execute in batches for better performance
 
     while state.status == PVM.CONTINUE && state.gas > 0 && step_count < max_steps && running
-        PVM.step!(state)
-        step_count += 1
+        # Batch execute until HOST call or other interrupt
+        PVM.step_n!(state, batch_size)
+        step_count += batch_size
 
         if state.status == PVM.HOST
-            handled = handle_corevm_host_call!(state, corevm)
+            handled = CoreVMExtension.handle_corevm_host_call!(state, corevm)
             if handled
                 skip = PVM.skip_distance(state.opcode_mask, Int(state.pc) + 1)
                 state.pc = state.pc + 1 + skip
+                state.status = PVM.CONTINUE
             else
                 println("\nUnhandled host call: $(state.host_call_id)")
                 break
             end
-        end
-
-        if step_count % 10_000_000 == 0
-            print(".")
-            flush(stdout)
         end
     end
 catch e
