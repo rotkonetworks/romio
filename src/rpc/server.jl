@@ -354,8 +354,36 @@ function rpc_service_data(server::RPCServer, params::Vector{Any})
 end
 
 function rpc_service_value(server::RPCServer, params::Vector{Any})
+    # JIP-2: serviceValue(block_hash, service_id, key) -> Blob | null
+    # Returns the value stored at key in service's storage, or null if not found
     length(params) < 3 && throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters", nothing))
-    # TODO: Implement service value lookup
+
+    # params[1] is block_hash (base64) - currently ignored, we use latest state
+    # block_hash = base64decode(params[1])
+    service_id = UInt32(params[2])
+    key = base64decode(params[3])
+
+    # Look up service
+    if !haskey(server.chain_state.services, service_id)
+        return nothing
+    end
+
+    service = server.chain_state.services[service_id]
+
+    # Get storage value - handle both CoreVMService (has .storage) and Dict types
+    storage = if hasproperty(service, :storage)
+        service.storage
+    elseif service isa Dict && haskey(service, "storage")
+        service["storage"]
+    else
+        return nothing
+    end
+
+    # Look up key in storage
+    if haskey(storage, key)
+        return base64encode(storage[key])
+    end
+
     return nothing
 end
 

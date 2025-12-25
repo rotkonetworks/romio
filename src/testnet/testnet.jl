@@ -785,6 +785,10 @@ function run_testnet(; port::UInt16 = UInt16(19800))
                     # Track for late subscription handling
                     # Store the most recent value for (service_id=0, key="created")
                     chain.recent_service_values[(UInt32(0), created_key)] = (new_service_id, chain.current_slot)
+
+                    # Also persist in service 0's storage for serviceValue RPC queries
+                    service_id_bytes = reinterpret(UInt8, [UInt32(new_service_id)])
+                    chain.services[UInt32(0)].storage[created_key] = Vector{UInt8}(service_id_bytes)
                 end
             end
 
