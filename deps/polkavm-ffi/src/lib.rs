@@ -400,7 +400,7 @@ pub extern "C" fn pvm_instance_reset(instance: *mut PvmInstance) {
         return;
     }
     let instance = unsafe { &mut (*instance).instance };
-    instance.reset_memory();
+    let _ = instance.reset_memory();
     // Reset all registers to 0
     for i in 0..13 {
         if let Some(r) = reg_from_u32(i) {
@@ -503,6 +503,7 @@ pub extern "C" fn pvm_module_export_pc(module: *const PvmModule, index: u32) -> 
 /// Read framebuffer from instance and convert indexed color to RGB24
 /// Doom format: 1 byte header + 768 byte palette (256*3 RGB) + 64000 indexed pixels
 /// Returns 0 on success, -1 on error
+#[cfg(feature = "doom")]
 #[no_mangle]
 pub extern "C" fn pvm_instance_read_framebuffer_rgb24(
     instance: *const PvmInstance,

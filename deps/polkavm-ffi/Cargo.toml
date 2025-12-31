@@ -2,9 +2,19 @@
 name = "polkavm-ffi"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "C FFI bindings for PolkaVM - execute PVM programs from any language"
+repository = "https://github.com/rotkonetworks/romio"
+keywords = ["polkavm", "pvm", "ffi", "wasm", "jam"]
+categories = ["api-bindings", "wasm", "virtualization"]
+readme = "README.md"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+doom = []  # enables doom-specific framebuffer helpers
 
 [dependencies]
 polkavm = "0.21"
