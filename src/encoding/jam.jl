@@ -81,3 +81,7 @@ function encode_jam_optional(value::Union{Nothing, Vector{UInt8}})::Vector{UInt8
         return vcat([UInt8(1)], value)
     end
 end
+
+# Note: CoreVM-specific file encoding functions have been moved to src/corevm/fs.jl
+# The functions corevm_file_hash() and encode_corevm_file() are corevm-host specific,
+# not part of the JAM graypaper spec.
