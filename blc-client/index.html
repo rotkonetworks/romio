@@ -1,0 +1,1263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BLC Terminal</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: monospace;
+            background: #000;
+            color: #0f0;
+            min-height: 100vh;
+            padding: 10px;
+            font-size: 14px;
+        }
+        .header {
+            border-bottom: 1px solid #0f0;
+            padding-bottom: 5px;
+            margin-bottom: 10px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+        .panel {
+            border: 1px solid #0f0;
+            padding: 8px;
+        }
+        .panel-title {
+            color: #0f0;
+            margin-bottom: 8px;
+        }
+        textarea, input[type="text"] {
+            width: 100%;
+            background: #000;
+            border: 1px solid #030;
+            color: #0f0;
+            font-family: monospace;
+            font-size: 14px;
+            padding: 5px;
+            resize: vertical;
+        }
+        textarea:focus, input:focus { outline: none; border-color: #0f0; }
+        textarea { min-height: 120px; }
+        button {
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 4px 12px;
+            cursor: pointer;
+            font-family: monospace;
+            font-size: 14px;
+            margin-right: 5px;
+            margin-top: 5px;
+        }
+        button:hover { background: #0f0; color: #000; }
+        button:disabled { color: #030; border-color: #030; cursor: not-allowed; }
+        button:disabled:hover { background: #000; color: #030; }
+        .btn-sm { padding: 2px 8px; font-size: 12px; }
+        .row { display: flex; gap: 8px; align-items: center; margin-top: 5px; }
+        .row input { flex: 1; }
+        .status { display: inline-block; }
+        .status::before { content: "["; }
+        .status::after { content: "]"; }
+        .status.ok { color: #0f0; }
+        .status.err { color: #f00; }
+        .status.wait { color: #ff0; }
+        .output {
+            background: #000;
+            border: 1px solid #030;
+            padding: 5px;
+            min-height: 80px;
+            max-height: 150px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+        .log {
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+        .log-line { border-bottom: 1px solid #030; padding: 2px 0; }
+        .log-time { color: #080; }
+        .log-info { color: #0f0; }
+        .log-ok { color: #0f0; }
+        .log-err { color: #f00; }
+        .log-tx { color: #ff0; }
+        .hex { color: #0ff; }
+        .examples { margin-bottom: 5px; }
+        .dim { color: #080; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <pre>
+ ____  _     ____   _____                   _             _
+| __ )| |   / ___| |_   _|__ _ __ _ __ ___ (_)_ __   __ _| |
+|  _ \| |  | |       | |/ _ \ '__| '_ ` _ \| | '_ \ / _` | |
+| |_) | |__| |___    | |  __/ |  | | | | | | | | | | (_| | |
+|____/|_____\____|   |_|\___|_|  |_| |_| |_|_|_| |_|\__,_|_|
+        </pre>
+        <span class="dim">binary lambda calculus on jam testnet</span>
+    </div>
+
+    <div class="panel" style="margin-bottom:10px">
+        <div class="panel-title">== JAM ==</div>
+        <div class="row">
+            <span class="dim">slot:</span>
+            <span id="jam-slot" style="color:#0ff">-</span>
+            <span class="dim">epoch:</span>
+            <span id="jam-epoch" style="color:#0ff">-</span>
+            <span class="dim">time:</span>
+            <span id="jam-time" class="dim">-</span>
+        </div>
+        <div class="row">
+            <span class="dim">block:</span>
+            <span id="jam-block" class="hex" style="font-size:11px">-</span>
+        </div>
+        <div class="row">
+            <span class="dim">services:</span>
+            <span id="jam-services" style="color:#0f0">-</span>
+            <span class="dim">cores:</span>
+            <span id="jam-cores" style="color:#0f0">-</span>
+        </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:10px">
+        <div class="panel-title">== WALLET ==</div>
+        <div class="row">
+            <span style="color:#ff0">Λ</span>
+            <span class="dim">balance:</span>
+            <span id="lambda-balance" style="color:#ff0;font-weight:bold">100,000,000</span>
+            <span class="dim">reductions</span>
+            <button class="btn-sm" onclick="requestFaucet()" id="faucet-btn">faucet (+1M)</button>
+            <button class="btn-sm" onclick="queryBalance()">sync</button>
+        </div>
+        <div class="row">
+            <span class="dim">address:</span>
+            <span id="wallet-address" class="hex" style="font-size:11px">generating...</span>
+            <button class="btn-sm" onclick="copyAddress()">copy</button>
+            <button class="btn-sm" onclick="newWallet()">new</button>
+        </div>
+        <div class="row">
+            <span class="dim">session:</span>
+            <span id="session-stats" class="dim">0 txs, 0 Λ spent</span>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="panel">
+            <div class="panel-title">== BRAINFUCK ==</div>
+            <div class="examples">
+                <button class="btn-sm" onclick="loadExample('hello')">hello</button>
+                <button class="btn-sm" onclick="loadExample('add')">2+3</button>
+                <button class="btn-sm" onclick="loadExample('fib')">fib</button>
+                <button class="btn-sm" onclick="loadExample('counter')">counter</button>
+            </div>
+            <textarea id="bf-editor" placeholder="> brainfuck code here">++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.</textarea>
+            <div class="row">
+                <span class="dim">input:</span>
+                <input type="text" id="bf-input" placeholder="stdin (optional)">
+            </div>
+            <button onclick="compileBf()">compile</button>
+            <button onclick="submitBf()" id="submit-bf-btn" disabled>submit</button>
+            <button onclick="document.getElementById('bf-editor').value=''">clear</button>
+            <div id="bf-output" class="output" style="display:none"></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title">== BLC ==</div>
+            <div class="examples">
+                <button class="btn-sm" onclick="loadBlcExample('id')">id</button>
+                <button class="btn-sm" onclick="loadBlcExample('true')">true</button>
+                <button class="btn-sm" onclick="loadBlcExample('false')">false</button>
+                <button class="btn-sm" onclick="loadBlcExample('s')">S</button>
+                <button class="btn-sm" onclick="loadBlcExample('k')">K</button>
+                <button class="btn-sm" onclick="loadBlcExample('omega')">Ω</button>
+                <button class="btn-sm" onclick="loadBlcExample('ycomb')">Y</button>
+            </div>
+            <textarea id="blc-editor" placeholder="> lambda or hex
+\x.x         (identity)
+0x20         (identity hex)
+\x.\y.x      (true)"></textarea>
+            <button onclick="parseBLC()">parse</button>
+            <button onclick="submitBLC()" id="submit-btn" disabled>submit</button>
+            <div id="blc-result" class="output" style="display:none"></div>
+        </div>
+    </div>
+
+    <div class="grid" style="margin-top:10px">
+        <div class="panel">
+            <div class="panel-title">== CONNECTION ==</div>
+            <div class="row">
+                <span class="dim">rpc:</span>
+                <input type="text" id="rpc-url" value="ws://localhost:19800">
+            </div>
+            <div class="row">
+                <span class="dim">service:</span>
+                <input type="text" id="service-id" value="1" style="width:60px">
+                <span class="dim">core:</span>
+                <input type="text" id="core-index" value="0" style="width:40px">
+            </div>
+            <div class="row">
+                <span class="dim">code_hash:</span>
+                <input type="text" id="code-hash" placeholder="32-byte hex (service code hash)" style="font-size:11px">
+            </div>
+            <div class="row">
+                <span class="dim">pvm gas:</span>
+                <input type="text" id="gas-limit" value="1000000000" style="width:100px">
+            </div>
+            <div class="row">
+                <span style="color:#ff0">Λ</span>
+                <span class="dim">lambda:</span>
+                <input type="text" id="lambda-gas" value="10000000" style="width:90px">
+                <span class="dim">@ 1Λ =</span>
+                <input type="text" id="lambda-rate" value="100" style="width:50px">
+                <span class="dim">pvm</span>
+            </div>
+            <button onclick="connect()">connect</button>
+            <button onclick="disconnect()">disconnect</button>
+            <div class="row">
+                <span class="dim">status:</span>
+                <span id="conn-status" class="status err">offline</span>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title">== RESULT ==</div>
+            <div class="row">
+                <span class="dim">pvm:</span>
+                <span id="gas-used">-</span>
+                <span class="dim">/</span>
+                <span id="gas-total">-</span>
+                <span id="gas-percent" class="dim"></span>
+            </div>
+            <div class="row">
+                <span style="color:#ff0">Λ</span>
+                <span class="dim">used:</span>
+                <span id="lambda-used" style="color:#ff0">-</span>
+                <span class="dim">/</span>
+                <span id="lambda-total">-</span>
+                <span id="lambda-percent" class="dim"></span>
+                <span class="dim">reductions</span>
+            </div>
+            <div id="exec-output" class="output">waiting...</div>
+        </div>
+    </div>
+
+    <div class="grid" style="margin-top:10px">
+        <div class="panel">
+            <div class="panel-title">== LOG ==</div>
+            <div id="log" class="log"></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title">== CODE VIEWER ==</div>
+            <div class="row">
+                <span class="dim">lookup:</span>
+                <input type="text" id="code-lookup" placeholder="hex hash or preimage" style="flex:1">
+                <button class="btn-sm" onclick="lookupCode()">view</button>
+            </div>
+            <div class="row">
+                <button class="btn-sm" onclick="viewLastSubmission()">last tx</button>
+                <button class="btn-sm" onclick="clearCodeViewer()">clear</button>
+            </div>
+            <div id="code-viewer" class="output" style="min-height:120px;max-height:200px">
+                <span class="dim">submit code to view it here...</span>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, * as blc from './pkg/blc_client.js';
+        // noble-ed25519 for real cryptographic signing
+        import * as ed from 'https://esm.sh/@noble/ed25519@2.1.0';
+
+        let ws = null;
+        let wasmReady = false;
+        let requestId = 1;
+        let pendingRequests = {};
+
+        // Wallet state (matches on-chain blc-corevm constants)
+        const INITIAL_BALANCE = 0;            // 0 Λ - must use faucet
+        const FAUCET_AMOUNT = 1_000_000;      // 1M Λ per faucet request (on-chain)
+        const MAX_BALANCE = 500_000_000;      // 500M Λ max balance
+        const FAUCET_COOLDOWN = 10_000;       // 10 second cooldown (testnet)
+
+        let wallet = {
+            address: null,
+            privateKey: null,
+            balance: INITIAL_BALANCE,
+            totalSpent: 0,
+            txCount: 0,
+            lastFaucet: 0
+        };
+
+        // Utility: bytes to hex
+        function bytesToHex(bytes) {
+            return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // Utility: hex to bytes
+        function hexToBytes(hex) {
+            const h = hex.replace('0x', '');
+            const bytes = new Uint8Array(h.length / 2);
+            for (let i = 0; i < bytes.length; i++) {
+                bytes[i] = parseInt(h.substr(i * 2, 2), 16);
+            }
+            return bytes;
+        }
+
+        // Generate real ed25519 keypair using noble-ed25519
+        async function generateKeypair() {
+            // Generate 32 random bytes for private key seed
+            const privateKey = new Uint8Array(32);
+            crypto.getRandomValues(privateKey);
+
+            // Derive public key from private key using ed25519
+            const publicKey = await ed.getPublicKeyAsync(privateKey);
+
+            // Address is the full 32-byte public key with Λ prefix
+            const privateKeyHex = bytesToHex(privateKey);
+            const publicKeyHex = bytesToHex(publicKey);
+            const address = 'Λ' + publicKeyHex;
+
+            return { privateKey: privateKeyHex, publicKey: publicKeyHex, address };
+        }
+
+        // Sign a message with ed25519
+        async function signMessage(privateKeyHex, message) {
+            const privateKey = hexToBytes(privateKeyHex);
+            const signature = await ed.signAsync(message, privateKey);
+            return signature;
+        }
+
+        // Build signed payload: sig[64] || pubkey[32] || payload[...]
+        async function buildSignedPayload(payloadHex) {
+            const payload = hexToBytes(payloadHex);
+            const privateKey = hexToBytes(wallet.privateKey);
+            const publicKey = hexToBytes(wallet.publicKey);
+
+            // Sign the payload
+            const signature = await ed.signAsync(payload, privateKey);
+
+            // Concatenate: sig[64] + pubkey[32] + payload[...]
+            const signedPayload = new Uint8Array(64 + 32 + payload.length);
+            signedPayload.set(signature, 0);        // sig at offset 0
+            signedPayload.set(publicKey, 64);       // pubkey at offset 64
+            signedPayload.set(payload, 96);         // payload at offset 96
+
+            return bytesToHex(signedPayload);
+        }
+
+        async function initWallet() {
+            // Check for saved wallet in localStorage
+            const saved = localStorage.getItem('blc_wallet');
+            if (saved) {
+                try {
+                    const parsed = JSON.parse(saved);
+                    wallet = { ...wallet, ...parsed };
+                } catch (e) {
+                    console.log('failed to restore wallet');
+                }
+            }
+
+            // Generate new keypair if needed (async)
+            if (!wallet.address || !wallet.publicKey) {
+                const kp = await generateKeypair();
+                wallet.address = kp.address;
+                wallet.privateKey = kp.privateKey;
+                wallet.publicKey = kp.publicKey;
+                saveWallet();
+                log('ok', 'ed25519 keypair generated');
+            }
+
+            updateWalletDisplay();
+        }
+
+        function saveWallet() {
+            localStorage.setItem('blc_wallet', JSON.stringify({
+                address: wallet.address,
+                privateKey: wallet.privateKey,
+                publicKey: wallet.publicKey,
+                balance: wallet.balance,
+                totalSpent: wallet.totalSpent,
+                txCount: wallet.txCount,
+                lastFaucet: wallet.lastFaucet
+            }));
+        }
+
+        function updateWalletDisplay() {
+            document.getElementById('wallet-address').textContent = wallet.address || 'none';
+            document.getElementById('lambda-balance').textContent = wallet.balance.toLocaleString();
+            document.getElementById('session-stats').textContent =
+                `${wallet.txCount} txs, ${wallet.totalSpent.toLocaleString()} Λ spent`;
+
+            // Color balance based on amount
+            const balEl = document.getElementById('lambda-balance');
+            if (wallet.balance <= 0) {
+                balEl.style.color = '#f00';
+            } else if (wallet.balance < INITIAL_BALANCE * 0.1) {
+                balEl.style.color = '#fa0';
+            } else {
+                balEl.style.color = '#ff0';
+            }
+        }
+
+        // Deduct lambda from wallet, returns true if sufficient funds
+        function spendLambda(amount) {
+            if (wallet.balance < amount) {
+                log('err', `insufficient Λ balance: need ${amount.toLocaleString()}, have ${wallet.balance.toLocaleString()}`);
+                return false;
+            }
+            wallet.balance -= amount;
+            wallet.totalSpent += amount;
+            wallet.txCount++;
+            saveWallet();
+            updateWalletDisplay();
+            return true;
+        }
+
+        // Request tokens from on-chain faucet
+        window.requestFaucet = async function() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('err', 'connect to testnet first');
+                return;
+            }
+
+            const now = Date.now();
+            const elapsed = now - wallet.lastFaucet;
+
+            if (elapsed < FAUCET_COOLDOWN) {
+                const remaining = Math.ceil((FAUCET_COOLDOWN - elapsed) / 1000);
+                log('err', `faucet cooldown: ${remaining}s remaining`);
+                return;
+            }
+
+            const serviceId = parseInt(document.getElementById('service-id').value) || 1;
+            const codeHash = document.getElementById('code-hash').value.trim().replace('0x', '');
+
+            if (!codeHash || codeHash.length !== 64) {
+                log('err', 'set code_hash first (connect to a deployed blc-corevm service)');
+                return;
+            }
+
+            try {
+                log('tx', 'requesting tokens from on-chain faucet...');
+                setStatus('faucet...', 'wait');
+
+                // Call blc_faucet with pubkey as payload
+                // Entry point 8 = blc_faucet in dispatch table
+                const pubkeyHex = wallet.publicKey;
+
+                // Submit faucet request via serviceValue RPC
+                const result = await rpcCall('serviceValue', [serviceId, 8, pubkeyHex]);
+
+                if (result && result.output) {
+                    // Parse balance from result
+                    const balanceHex = result.output;
+                    const newBalance = parseInt(balanceHex, 16);
+                    wallet.balance = newBalance;
+                    wallet.lastFaucet = now;
+                    saveWallet();
+                    updateWalletDisplay();
+                    log('ok', `faucet success! balance: ${newBalance.toLocaleString()} Λ`);
+                } else {
+                    // Fallback: assume success with default amount
+                    wallet.balance += FAUCET_AMOUNT;
+                    wallet.lastFaucet = now;
+                    saveWallet();
+                    updateWalletDisplay();
+                    log('ok', `faucet request sent (balance may update next query)`);
+                }
+
+                setStatus('online', 'ok');
+            } catch (e) {
+                setStatus('online', 'ok');
+                log('err', 'faucet failed: ' + e.message);
+            }
+        };
+
+        // Query on-chain balance for wallet
+        window.queryBalance = async function() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('err', 'connect to testnet first');
+                return;
+            }
+
+            const serviceId = parseInt(document.getElementById('service-id').value) || 1;
+            const codeHash = document.getElementById('code-hash').value.trim().replace('0x', '');
+
+            if (!codeHash || codeHash.length !== 64) {
+                log('err', 'set code_hash first');
+                return;
+            }
+
+            try {
+                log('info', 'querying on-chain balance...');
+
+                // Call blc_get_balance_for with pubkey
+                // Entry point 10 = blc_get_balance_for in dispatch table
+                const pubkeyHex = wallet.publicKey;
+                const result = await rpcCall('serviceValue', [serviceId, 10, pubkeyHex]);
+
+                if (result && result.output) {
+                    const balanceHex = result.output;
+                    const balance = parseInt(balanceHex, 16);
+                    wallet.balance = balance;
+                    saveWallet();
+                    updateWalletDisplay();
+                    log('ok', `on-chain balance: ${balance.toLocaleString()} Λ`);
+                } else {
+                    log('info', 'no balance found (use faucet first)');
+                }
+            } catch (e) {
+                log('err', 'balance query failed: ' + e.message);
+            }
+        };
+
+        window.copyAddress = function() {
+            navigator.clipboard.writeText(wallet.address).then(() => {
+                log('info', 'address copied to clipboard');
+            });
+        };
+
+        window.newWallet = async function() {
+            if (!confirm('Create new wallet? Current balance will be lost.')) return;
+            const kp = await generateKeypair();
+            wallet = {
+                address: kp.address,
+                privateKey: kp.privateKey,
+                publicKey: kp.publicKey,
+                balance: INITIAL_BALANCE,
+                totalSpent: 0,
+                txCount: 0,
+                lastFaucet: 0
+            };
+            saveWallet();
+            updateWalletDisplay();
+            log('ok', 'ed25519 wallet created: ' + kp.address.slice(0, 20) + '...');
+        };
+
+        // bf.Blc - 112 byte brainfuck interpreter in BLC (8-bit format)
+        // from https://justine.lol/lambda/
+        const BF_INTERPRETER_HEX = '4451a1018455d502b7703022ff32f000bff9857f5ee16f957f7deec0e55468005855fdfbe04557fdebfbf0b6f02fd607e16f73d7f114bcc00bff2e1fa16f6617e85bef2fcfff13ffe1ca34200ac8d00b99ee1fe5ff7f5a6a1fff0fff879d04d0ab0005db2340b73b28ccc0b06c0e7410';
+
+        async function initWasm() {
+            try {
+                await init();
+                wasmReady = true;
+                log('info', 'wasm loaded');
+                log('info', 'id=' + blc.identity_hex() + ' true=' + blc.church_true_hex() + ' false=' + blc.church_false_hex());
+                // Initialize wallet after wasm is ready
+                initWallet();
+            } catch (e) {
+                log('err', 'wasm fail: ' + e);
+            }
+        }
+
+        function log(type, msg) {
+            const el = document.getElementById('log');
+            const t = new Date().toLocaleTimeString('en-US', {hour12:false});
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            line.innerHTML = `<span class="log-time">${t}</span> <span class="log-${type}">[${type.toUpperCase()}]</span> ${escapeHtml(msg)}`;
+            el.insertBefore(line, el.firstChild);
+        }
+
+        function escapeHtml(t) {
+            return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function setStatus(s, cls) {
+            const el = document.getElementById('conn-status');
+            el.textContent = s;
+            el.className = 'status ' + cls;
+        }
+
+        // Update gas display from execution result
+        function updateGasDisplay(result, gasLimit) {
+            const usedEl = document.getElementById('gas-used');
+            const totalEl = document.getElementById('gas-total');
+            const percentEl = document.getElementById('gas-percent');
+
+            totalEl.textContent = gasLimit.toLocaleString();
+
+            // Try to extract gas_used from result
+            let gasUsed = null;
+            if (result && typeof result === 'object') {
+                if (result.gas_remaining !== undefined) {
+                    gasUsed = gasLimit - result.gas_remaining;
+                } else if (result.gasRemaining !== undefined) {
+                    gasUsed = gasLimit - result.gasRemaining;
+                }
+                if (result.gas_used !== undefined) gasUsed = result.gas_used;
+                if (result.gasUsed !== undefined) gasUsed = result.gasUsed;
+            }
+
+            if (gasUsed !== null && gasUsed >= 0) {
+                usedEl.textContent = gasUsed.toLocaleString();
+                const pct = ((gasUsed / gasLimit) * 100).toFixed(1);
+                percentEl.textContent = ` (${pct}%)`;
+                if (gasUsed >= gasLimit) {
+                    usedEl.style.color = '#f00';
+                    percentEl.textContent = ' (OUT OF GAS)';
+                } else if (gasUsed > gasLimit * 0.9) {
+                    usedEl.style.color = '#ff0';
+                } else {
+                    usedEl.style.color = '#0f0';
+                }
+
+                // Calculate lambda tokens from PVM gas
+                updateLambdaDisplay(gasUsed, gasLimit);
+            } else {
+                usedEl.textContent = '?';
+                usedEl.style.color = '#080';
+                percentEl.textContent = '';
+                // Simulate lambda usage based on gas limit
+                updateLambdaDisplay(null, gasLimit);
+            }
+        }
+
+        // Update lambda token display
+        function updateLambdaDisplay(pvmUsed, pvmLimit) {
+            const lambdaGas = parseInt(document.getElementById('lambda-gas').value) || 10000000;
+            const lambdaRate = parseInt(document.getElementById('lambda-rate').value) || 100;
+
+            const lambdaUsedEl = document.getElementById('lambda-used');
+            const lambdaTotalEl = document.getElementById('lambda-total');
+            const lambdaPercentEl = document.getElementById('lambda-percent');
+
+            lambdaTotalEl.textContent = lambdaGas.toLocaleString();
+
+            if (pvmUsed !== null) {
+                // Calculate lambda reductions from PVM gas used
+                // Each lambda reduction costs `lambdaRate` PVM gas
+                const lambdaUsed = Math.floor(pvmUsed / lambdaRate);
+                lambdaUsedEl.textContent = lambdaUsed.toLocaleString();
+
+                const pct = ((lambdaUsed / lambdaGas) * 100).toFixed(1);
+                if (lambdaUsed >= lambdaGas) {
+                    lambdaUsedEl.style.color = '#f00';
+                    lambdaPercentEl.textContent = ' (Λ EXHAUSTED)';
+                } else if (lambdaUsed > lambdaGas * 0.9) {
+                    lambdaUsedEl.style.color = '#fa0';
+                    lambdaPercentEl.textContent = ` (${pct}%)`;
+                } else {
+                    lambdaUsedEl.style.color = '#ff0';
+                    lambdaPercentEl.textContent = ` (${pct}%)`;
+                }
+            } else {
+                lambdaUsedEl.textContent = '?';
+                lambdaUsedEl.style.color = '#880';
+                lambdaPercentEl.textContent = '';
+            }
+        }
+
+        function resetGasDisplay() {
+            document.getElementById('gas-used').textContent = '-';
+            document.getElementById('gas-used').style.color = '#0f0';
+            document.getElementById('gas-total').textContent = '-';
+            document.getElementById('gas-percent').textContent = '';
+            document.getElementById('lambda-used').textContent = '-';
+            document.getElementById('lambda-used').style.color = '#ff0';
+            document.getElementById('lambda-total').textContent = '-';
+            document.getElementById('lambda-percent').textContent = '';
+        }
+
+        // JAM chain state
+        let jamState = {
+            slot: 0,
+            epoch: 0,
+            block: null,
+            services: 0,
+            cores: 0,
+            pollInterval: null
+        };
+
+        // JAM epoch length (600 slots = 1 epoch, 6 seconds per slot)
+        const SLOTS_PER_EPOCH = 600;
+        const SLOT_DURATION_MS = 6000;
+
+        // Update JAM chain display
+        function updateJamDisplay() {
+            document.getElementById('jam-slot').textContent = jamState.slot.toLocaleString();
+            document.getElementById('jam-epoch').textContent = jamState.epoch.toLocaleString();
+            document.getElementById('jam-services').textContent = jamState.services;
+            document.getElementById('jam-cores').textContent = jamState.cores;
+
+            if (jamState.block) {
+                const shortHash = jamState.block.slice(0, 8) + '...' + jamState.block.slice(-8);
+                document.getElementById('jam-block').textContent = shortHash;
+            } else {
+                document.getElementById('jam-block').textContent = '-';
+            }
+
+            // Calculate time within slot (0-6 seconds)
+            const now = Date.now();
+            const slotProgress = (now % SLOT_DURATION_MS) / SLOT_DURATION_MS;
+            const slotSec = (slotProgress * 6).toFixed(1);
+            document.getElementById('jam-time').textContent = `${slotSec}s`;
+        }
+
+        // Fetch JAM chain state via RPC
+        async function fetchJamState() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+            try {
+                // Fetch current state
+                const state = await rpcCall('state', []);
+                if (state) {
+                    if (state.slot !== undefined) jamState.slot = state.slot;
+                    if (state.timeslot !== undefined) jamState.slot = state.timeslot;
+                    if (state.epoch !== undefined) {
+                        jamState.epoch = state.epoch;
+                    } else {
+                        jamState.epoch = Math.floor(jamState.slot / SLOTS_PER_EPOCH);
+                    }
+                    if (state.header_hash) jamState.block = state.header_hash;
+                    if (state.headerHash) jamState.block = state.headerHash;
+                    if (state.services !== undefined) jamState.services = state.services;
+                    if (state.cores !== undefined) jamState.cores = state.cores;
+                }
+                updateJamDisplay();
+            } catch (e) {
+                // Try alternative RPC methods
+                try {
+                    const info = await rpcCall('jam_getInfo', []);
+                    if (info) {
+                        if (info.slot !== undefined) jamState.slot = info.slot;
+                        if (info.timeslot !== undefined) jamState.slot = info.timeslot;
+                        jamState.epoch = Math.floor(jamState.slot / SLOTS_PER_EPOCH);
+                        if (info.bestBlock) jamState.block = info.bestBlock;
+                        if (info.best_block) jamState.block = info.best_block;
+                    }
+                    updateJamDisplay();
+                } catch (e2) {
+                    // Silently fail - will retry on next poll
+                }
+            }
+        }
+
+        // Start polling JAM state when connected
+        function startJamPolling() {
+            if (jamState.pollInterval) return;
+            fetchJamState();
+            jamState.pollInterval = setInterval(fetchJamState, 6000); // Poll every slot
+            // Update time display more frequently
+            setInterval(updateJamDisplay, 100);
+        }
+
+        // Stop polling when disconnected
+        function stopJamPolling() {
+            if (jamState.pollInterval) {
+                clearInterval(jamState.pollInterval);
+                jamState.pollInterval = null;
+            }
+            document.getElementById('jam-slot').textContent = '-';
+            document.getElementById('jam-epoch').textContent = '-';
+            document.getElementById('jam-block').textContent = '-';
+            document.getElementById('jam-time').textContent = '-';
+        }
+
+        window.connect = function() {
+            const url = document.getElementById('rpc-url').value;
+            log('info', 'connecting to ' + url);
+            setStatus('connecting...', 'wait');
+
+            try {
+                if (ws) ws.close();
+                ws = new WebSocket(url);
+
+                ws.onopen = () => {
+                    setStatus('online', 'ok');
+                    log('ok', 'connected');
+                    document.getElementById('submit-btn').disabled = false;
+                    document.getElementById('submit-bf-btn').disabled = false;
+                    startJamPolling();
+                };
+
+                ws.onclose = () => {
+                    setStatus('offline', 'err');
+                    log('info', 'disconnected');
+                    document.getElementById('submit-btn').disabled = true;
+                    document.getElementById('submit-bf-btn').disabled = true;
+                    stopJamPolling();
+                };
+
+                ws.onerror = (e) => {
+                    setStatus('error', 'err');
+                    log('err', 'connection failed');
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        handleMessage(JSON.parse(event.data));
+                    } catch (e) {
+                        log('err', 'parse error: ' + e.message);
+                    }
+                };
+            } catch (e) {
+                log('err', 'connect fail: ' + e);
+                setStatus('error', 'err');
+            }
+        };
+
+        window.disconnect = function() {
+            if (ws) { ws.close(); ws = null; }
+        };
+
+        function handleMessage(msg) {
+            if (msg.id && pendingRequests[msg.id]) {
+                const { resolve, reject, method } = pendingRequests[msg.id];
+                delete pendingRequests[msg.id];
+                if (msg.error) {
+                    log('err', method + ': ' + msg.error.message);
+                    reject(new Error(msg.error.message));
+                } else {
+                    log('ok', method + ' ok');
+                    resolve(msg.result);
+                }
+            } else if (msg.params) {
+                log('info', 'event: ' + JSON.stringify(msg.params).slice(0, 60));
+            }
+        }
+
+        function rpcCall(method, params) {
+            return new Promise((resolve, reject) => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    reject(new Error('not connected'));
+                    return;
+                }
+                const id = requestId++;
+                pendingRequests[id] = { resolve, reject, method };
+                ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+                setTimeout(() => {
+                    if (pendingRequests[id]) {
+                        delete pendingRequests[id];
+                        reject(new Error('timeout'));
+                    }
+                }, 10000);
+            });
+        }
+
+        window.parseBLC = function() {
+            if (!wasmReady) { log('err', 'wasm not ready'); return; }
+            const text = document.getElementById('blc-editor').value.trim();
+            const out = document.getElementById('blc-result');
+            if (!text) { out.style.display = 'none'; return; }
+
+            try {
+                let parsed, hex;
+                if (text.startsWith('0x') || /^[0-9a-fA-F]+$/.test(text)) {
+                    parsed = blc.parse_blc_hex(text);
+                    hex = text.replace('0x', '');
+                } else {
+                    parsed = blc.parse_blc_lambda(text);
+                    hex = blc.encode_to_hex(text);
+                }
+                out.style.display = 'block';
+                out.innerHTML = `term: ${escapeHtml(parsed)}\nhex:  <span class="hex">${hex}</span>\nsize: ${hex.length/2} bytes`;
+                log('ok', 'parsed: ' + parsed);
+            } catch (e) {
+                out.style.display = 'block';
+                out.innerHTML = '<span class="log-err">error: ' + escapeHtml(e.toString()) + '</span>';
+                log('err', 'parse: ' + e);
+            }
+        };
+
+        window.submitBLC = async function() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('err', 'not connected');
+                return;
+            }
+            const text = document.getElementById('blc-editor').value.trim();
+            const serviceId = parseInt(document.getElementById('service-id').value) || 1;
+            const coreIndex = parseInt(document.getElementById('core-index').value) || 0;
+            const codeHash = document.getElementById('code-hash').value.trim().replace('0x', '');
+            const gasLimit = parseInt(document.getElementById('gas-limit').value) || 1000000000;
+            const lambdaGas = parseInt(document.getElementById('lambda-gas').value) || 10000000;
+
+            if (!codeHash || codeHash.length !== 64) {
+                log('err', 'code_hash must be 32 bytes (64 hex chars)');
+                return;
+            }
+
+            // Check wallet balance before submitting
+            if (!spendLambda(lambdaGas)) {
+                return;
+            }
+
+            try {
+                let hex;
+                if (text.startsWith('0x') || /^[0-9a-fA-F]+$/.test(text)) {
+                    hex = text.replace('0x', '');
+                } else {
+                    hex = blc.encode_to_hex(text);
+                }
+
+                // Store for code viewer
+                storeSubmission(hex, text.startsWith('0x') ? null : text, 'blc');
+
+                // Sign the payload: sig[64] || pubkey[32] || blc_program[...]
+                log('tx', 'signing payload with ed25519...');
+                setStatus('signing...', 'wait');
+                const signedHex = await buildSignedPayload(hex);
+                log('ok', 'payload signed (sig:64 + pub:32 + blc:' + (hex.length/2) + ' = ' + (signedHex.length/2) + ' bytes)');
+
+                log('tx', 'step 1: storing preimage (' + signedHex.length/2 + ' bytes)');
+                setStatus('storing...', 'wait');
+
+                // Step 1: Submit the signed BLC payload as a preimage
+                const bytes = new Uint8Array(signedHex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                const b64 = btoa(String.fromCharCode.apply(null, bytes));
+                await rpcCall('submitPreimage', [serviceId, b64]);
+                log('ok', 'preimage stored');
+
+                // Step 2: Build and submit work package
+                log('tx', 'step 2: submitting work package');
+                setStatus('executing...', 'wait');
+
+                const rpcJson = blc.build_submit_work_package_rpc(
+                    requestId++,
+                    coreIndex,
+                    serviceId,
+                    codeHash,
+                    signedHex,
+                    BigInt(gasLimit)
+                );
+
+                // Send the RPC request directly (already JSON formatted)
+                const wpResult = await new Promise((resolve, reject) => {
+                    const msg = JSON.parse(rpcJson);
+                    pendingRequests[msg.id] = { resolve, reject, method: 'submitWorkPackage' };
+                    ws.send(rpcJson);
+                    setTimeout(() => {
+                        if (pendingRequests[msg.id]) {
+                            delete pendingRequests[msg.id];
+                            reject(new Error('timeout'));
+                        }
+                    }, 30000);
+                });
+
+                setStatus('online', 'ok');
+                updateGasDisplay(wpResult, gasLimit);
+                const resultMsg = wpResult === null ? 'work package submitted' : JSON.stringify(wpResult, null, 2);
+                document.getElementById('exec-output').textContent = resultMsg;
+                log('ok', 'work package: ' + resultMsg);
+            } catch (e) {
+                setStatus('online', 'ok');
+                resetGasDisplay();
+                log('err', 'submit: ' + e.message);
+            }
+        };
+
+        // Convert string to hex (8-bit encoding for Blc format)
+        function stringToHex(str) {
+            return Array.from(str).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+        }
+
+        // Build the BLC payload: bf.Blc interpreter + brainfuck code + input
+        function buildBfPayload() {
+            const code = document.getElementById('bf-editor').value;
+            const input = document.getElementById('bf-input').value;
+            // bf.Blc expects: <interpreter> <bf_program> <input>
+            const bfHex = stringToHex(code + '\n' + input);
+            return BF_INTERPRETER_HEX + bfHex;
+        }
+
+        window.compileBf = function() {
+            const code = document.getElementById('bf-editor').value;
+            const input = document.getElementById('bf-input').value;
+            const out = document.getElementById('bf-output');
+
+            if (!code.trim()) { out.style.display = 'none'; return; }
+
+            const payload = buildBfPayload();
+            const interpreterSize = BF_INTERPRETER_HEX.length / 2;
+            const codeSize = code.length;
+            const inputSize = input.length;
+            const totalSize = payload.length / 2;
+
+            out.style.display = 'block';
+            out.innerHTML = `interp: ${interpreterSize} bytes (bf.Blc)
+bf:     ${codeSize} chars
+input:  ${inputSize} bytes
+total:  <span class="hex">${totalSize} bytes</span>
+hex:    <span class="hex">${payload.slice(0,60)}...</span>`;
+            log('ok', 'bf payload: ' + totalSize + ' bytes');
+        };
+
+        window.submitBf = async function() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('err', 'not connected');
+                return;
+            }
+
+            const serviceId = parseInt(document.getElementById('service-id').value) || 1;
+            const coreIndex = parseInt(document.getElementById('core-index').value) || 0;
+            const codeHash = document.getElementById('code-hash').value.trim().replace('0x', '');
+            const gasLimit = parseInt(document.getElementById('gas-limit').value) || 1000000000;
+            const lambdaGas = parseInt(document.getElementById('lambda-gas').value) || 10000000;
+
+            if (!codeHash || codeHash.length !== 64) {
+                log('err', 'code_hash must be 32 bytes (64 hex chars)');
+                return;
+            }
+
+            const code = document.getElementById('bf-editor').value;
+            if (!code.trim()) {
+                log('err', 'no brainfuck code');
+                return;
+            }
+
+            // Check wallet balance before submitting
+            if (!spendLambda(lambdaGas)) {
+                return;
+            }
+
+            try {
+                const payload = buildBfPayload();
+                const totalSize = payload.length / 2;
+
+                // Store for code viewer
+                storeSubmission(payload, code, 'bf');
+
+                // Sign the payload: sig[64] || pubkey[32] || bf_payload[...]
+                log('tx', 'signing bf payload with ed25519...');
+                setStatus('signing...', 'wait');
+                const signedPayload = await buildSignedPayload(payload);
+                log('ok', 'payload signed (sig:64 + pub:32 + bf:' + totalSize + ' = ' + (signedPayload.length/2) + ' bytes)');
+
+                log('tx', 'storing preimage (' + signedPayload.length/2 + ' bytes)');
+                setStatus('storing...', 'wait');
+
+                // Step 1: Submit signed payload as preimage
+                const bytes = new Uint8Array(signedPayload.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+                const b64 = btoa(String.fromCharCode.apply(null, bytes));
+                await rpcCall('submitPreimage', [serviceId, b64]);
+                log('ok', 'preimage stored');
+
+                // Step 2: Build and submit work package
+                log('tx', 'submitting work package');
+                setStatus('executing...', 'wait');
+
+                const rpcJson = blc.build_submit_work_package_rpc(
+                    requestId++,
+                    coreIndex,
+                    serviceId,
+                    codeHash,
+                    signedPayload,
+                    BigInt(gasLimit)
+                );
+
+                const wpResult = await new Promise((resolve, reject) => {
+                    const msg = JSON.parse(rpcJson);
+                    pendingRequests[msg.id] = { resolve, reject, method: 'submitWorkPackage' };
+                    ws.send(rpcJson);
+                    setTimeout(() => {
+                        if (pendingRequests[msg.id]) {
+                            delete pendingRequests[msg.id];
+                            reject(new Error('timeout'));
+                        }
+                    }, 30000);
+                });
+
+                setStatus('online', 'ok');
+                updateGasDisplay(wpResult, gasLimit);
+                const resultMsg = wpResult === null ? 'bf work package submitted' : JSON.stringify(wpResult, null, 2);
+                document.getElementById('exec-output').textContent = resultMsg;
+                log('ok', 'bf execution: ' + resultMsg);
+            } catch (e) {
+                setStatus('online', 'ok');
+                resetGasDisplay();
+                log('err', 'bf submit: ' + e.message);
+            }
+        };
+
+        window.loadExample = function(name) {
+            const ex = {
+                hello: '++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.',
+                add: '++>+++<[->+<]>.',
+                loop: '+++++[>++++++++++<-]>.',
+                // Fibonacci sequence - outputs fib numbers as ASCII
+                // This runs indefinitely until gas exhaustion
+                fib: `
+>++++++++++>+>+[
+    [+++++[>++++++++<-]>.<++++++[>--------<-]+<<<]>.>>[
+        [-]<[>+<-]>>[<<+>+>-]<[>+<-[>+<-[>+<-[>+<-[>+<-[>+<-
+            [>+<-[>+<-[>+<-[>[-]>+>+<<<-[>+<-]]]]]]]]]]]+>>>
+    ]<<<
+]`.replace(/\s+/g, ''),
+                // Infinite counter - increments and prints forever
+                counter: '+[.+]',
+                // Prints increasing ASCII chars forever
+                ascii: '+[.[-]+]'
+            };
+            document.getElementById('bf-editor').value = ex[name] || '';
+        };
+
+        // BLC examples - pure lambda calculus
+        // BLC encoding: 00=λ, 01=app, 1^n 0=var(n)
+        window.loadBlcExample = function(name) {
+            const ex = {
+                // identity: λx.x = 00 10 = 0x20
+                id: '\\x.x',
+                // omega combinator: (λx.xx)(λx.xx) - infinite self-application
+                // λx.xx = 00 01 10 10 = 0x16
+                // Ω = (λx.xx)(λx.xx) = 01 (00 01 10 10) (00 01 10 10)
+                // encoded: 01 00011010 00011010 = 0x4b6c in bits but needs alignment
+                // let's use lambda notation for clarity
+                omega: '(\\x.x x)(\\x.x x)',
+                // Y combinator (diverges when applied)
+                // Y = λf.(λx.f(xx))(λx.f(xx))
+                ycomb: '\\f.(\\x.f (x x))(\\x.f (x x))',
+                // infinite loop via omega applied to identity
+                loop: '(\\x.x x)(\\x.x x)',
+                // invert - bit inverter (NOT gate on stream)
+                // applies forever on input bits
+                invert: '\\b.\\t.\\f.b f t',
+                // true = λt.λf.t
+                true: '\\t.\\f.t',
+                // false = λt.λf.f
+                false: '\\t.\\f.f',
+                // S combinator - λx.λy.λz.xz(yz)
+                s: '\\x.\\y.\\z.x z (y z)',
+                // K combinator - λx.λy.x
+                k: '\\x.\\y.x'
+            };
+            document.getElementById('blc-editor').value = ex[name] || '';
+        };
+
+        // Code viewer - track last submission
+        let lastSubmission = {
+            hex: null,
+            lambda: null,
+            type: null  // 'blc' or 'bf'
+        };
+
+        // Store last submission for viewing
+        function storeSubmission(hex, lambda, type) {
+            lastSubmission = { hex, lambda, type };
+        }
+
+        // Decode hex to printable representation
+        function hexToDisplay(hex) {
+            const bytes = hexToBytes(hex);
+            let ascii = '';
+            let printable = true;
+            for (const b of bytes) {
+                if (b >= 32 && b < 127) {
+                    ascii += String.fromCharCode(b);
+                } else if (b === 10) {
+                    ascii += '\\n';
+                } else if (b === 13) {
+                    ascii += '\\r';
+                } else if (b === 9) {
+                    ascii += '\\t';
+                } else {
+                    ascii += '.';
+                    printable = false;
+                }
+            }
+            return { ascii, printable, bytes };
+        }
+
+        // Format code for display
+        function formatCodeDisplay(hex, lambda, type) {
+            const display = hexToDisplay(hex);
+            let html = '';
+
+            html += `<span class="dim">type:</span> ${type || 'unknown'}\n`;
+            html += `<span class="dim">size:</span> ${hex.length / 2} bytes\n\n`;
+
+            if (lambda) {
+                html += `<span class="dim">lambda:</span>\n<span style="color:#0f0">${escapeHtml(lambda)}</span>\n\n`;
+            }
+
+            html += `<span class="dim">hex:</span>\n<span class="hex">${hex.slice(0, 64)}${hex.length > 64 ? '...' : ''}</span>\n\n`;
+
+            if (display.printable || type === 'bf') {
+                html += `<span class="dim">ascii:</span>\n${escapeHtml(display.ascii.slice(0, 200))}${display.ascii.length > 200 ? '...' : ''}`;
+            }
+
+            return html;
+        }
+
+        window.viewLastSubmission = function() {
+            const viewer = document.getElementById('code-viewer');
+            if (!lastSubmission.hex) {
+                viewer.innerHTML = '<span class="dim">no submissions yet</span>';
+                return;
+            }
+            viewer.innerHTML = formatCodeDisplay(lastSubmission.hex, lastSubmission.lambda, lastSubmission.type);
+        };
+
+        window.lookupCode = async function() {
+            const input = document.getElementById('code-lookup').value.trim().replace('0x', '');
+            const viewer = document.getElementById('code-viewer');
+
+            if (!input) {
+                viewer.innerHTML = '<span class="dim">enter hex to lookup</span>';
+                return;
+            }
+
+            // If it looks like raw hex code (not a hash), just display it
+            if (input.length > 64) {
+                try {
+                    // Try to parse as BLC
+                    let lambda = null;
+                    try {
+                        lambda = blc.parse_blc_hex(input);
+                    } catch (e) {
+                        // Not valid BLC, that's ok
+                    }
+                    viewer.innerHTML = formatCodeDisplay(input, lambda, lambda ? 'blc' : 'raw');
+                } catch (e) {
+                    viewer.innerHTML = `<span class="log-err">error: ${escapeHtml(e.message)}</span>`;
+                }
+                return;
+            }
+
+            // Otherwise try to look it up as a hash via RPC
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                viewer.innerHTML = '<span class="log-err">connect to lookup by hash</span>';
+                return;
+            }
+
+            const serviceId = parseInt(document.getElementById('service-id').value) || 1;
+
+            try {
+                viewer.innerHTML = '<span class="dim">looking up...</span>';
+                const result = await rpcCall('getPreimage', [serviceId, input]);
+                if (result && result.data) {
+                    const hex = result.data;
+                    let lambda = null;
+                    try {
+                        lambda = blc.parse_blc_hex(hex);
+                    } catch (e) {}
+                    viewer.innerHTML = formatCodeDisplay(hex, lambda, lambda ? 'blc' : 'raw');
+                } else {
+                    viewer.innerHTML = '<span class="dim">preimage not found</span>';
+                }
+            } catch (e) {
+                viewer.innerHTML = `<span class="log-err">lookup failed: ${escapeHtml(e.message)}</span>`;
+            }
+        };
+
+        window.clearCodeViewer = function() {
+            document.getElementById('code-viewer').innerHTML = '<span class="dim">submit code to view it here...</span>';
+            document.getElementById('code-lookup').value = '';
+        };
+
+        initWasm();
+    </script>
+</body>
+</html>
