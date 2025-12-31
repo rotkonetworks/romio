@@ -1,72 +1,67 @@
-# Doom on PVM
+# doom on pvm
 
-## Get the polkajam tools (includes jamt CLI)
+## fetch polkajam tools
 
 ```bash
-# Use the fetch script (requires: gh, jq)
+# fetch the latest release
 ./scripts/fetch-jamt.sh
 
-# The script fetches the latest nightly from paritytech/polkajam-releases
-# and extracts to /tmp/polkajam-nightly-YYYY-MM-DD-linux-x86_64/
+# extracts to /tmp/polkajam-v0.1.27-linux-x86_64/
 ```
 
-## Performance
+## performance
 
-| Backend | FPS | Notes |
+| backend | fps | notes |
 |---------|-----|-------|
-| Pure Julia interpreter | ~0.5 | Educational, fully transparent implementation |
-| Native polkavm FFI | ~35 | Uses Rust polkavm via ccall |
-| polkajam (Rust, JIT) | ~35 | Reference implementation with JIT compilation |
-| polkajam (Rust, interpreter) | ~1.5 | `POLKAVM_BACKEND=interpreter` |
+| pure julia interpreter | ~0.5 | fully transparent pvm implementation |
+| rust polkavm ffi (jit) | ~35 | uses polkavm via ccall |
+| polkajam (rust, jit) | ~35 | reference implementation |
 
-The pure Julia interpreter is ~70x slower than native execution but provides a fully transparent, auditable PVM implementation for research and validation purposes.
+## run doom
 
-## Run
+### native polkavm ffi (~35 fps)
 
-### Pure Julia interpreter (~0.5 FPS)
+```bash
+# build the ffi library
+cd deps/polkavm-ffi && cargo build --release && cd ../..
+
+# run with sdl2 window
+julia --project=. examples/doom/doom_sdl.jl
+```
+
+### pure julia interpreter (~0.5 fps)
 
 ```bash
 julia --project=. examples/doom/doom_julia.jl
 ```
 
-### Native polkavm FFI (~35 FPS)
+## corevm format
 
-```bash
-cd deps/polkavm-ffi && cargo build --release && cd ../..
+doom.corevm contains a metadata header + pvm bytecode:
 
-# mpv backend
-julia --project=. examples/doom/doom_play.jl
+```
+header:
+  - format marker (0x3c or 0x50)
+  - name, version, license, author (length-prefixed)
 
-# SDL2 window
-julia --project=. examples/doom/doom_sdl.jl
+pvm blob:
+  - starts with "PVM\0" magic
+  - polkavm bytecode
 ```
 
-## Blob format
-
-doom.corevm contains:
-- CoreVM header
-- PVM bytecode (after "PVM" magic)
-
-Host calls used:
+host calls used by doom:
 - 0: init (returns screen width/height)
 - 1: sbrk (allocate pages)
 - 2: framebuffer (1 byte header + 768 byte palette + 64000 indexed pixels)
 
-The viewer converts indexed pixels to RGB24 via the palette.
+## testnet integration
 
-## jamt CLI compatibility
-
-romio implements JIP-2 (JAM RPC) and is compatible with the `jamt` CLI tool from polkajam.
+romio implements jam rpc (jip-2) and works with jamt cli:
 
 ```bash
-# Fetch latest jamt
-./scripts/fetch-jamt.sh
+# start testnet with bootstrap service
+julia --project=. -e 'using JAM; JAM.JuliaJAMTestnet.run()'
 
-# Start romio testnet
-./bin/romio testnet -n 3 --base-rpc-port 19800
-
-# Use jamt to interact (note: requires Bootstrap service for vm new)
-/tmp/polkajam-nightly-*/jamt --help
+# deploy doom via jamt
+jamt --rpc ws://localhost:19800 vm new /tmp/polkajam-v0.1.27-linux-x86_64/doom.corevm 1000000000
 ```
-
-Note: `jamt vm new` requires the Bootstrap service (service #0) to be pre-installed in the genesis state. This is available in polkajam-testnet but not yet in romio.

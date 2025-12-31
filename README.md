@@ -35,12 +35,30 @@ make test   # run tests
 ## Run
 
 ```bash
+# cli help
 make run ARGS="--help"
-make run ARGS="run --chain dev"
+
+# run testnet (compatible with jamt cli)
+make run ARGS="testnet"
 
 # or directly:
-julia -J build/romio.so --project=. bin/romio --help
+julia -J build/romio.so --project=. bin/romio testnet
 ```
+
+## Testnet
+
+romio runs a jam-compatible testnet with bootstrap service:
+
+```bash
+# start testnet
+./bin/romio testnet
+
+# in another terminal, use jamt to deploy services
+jamt --rpc ws://localhost:19800 create-service ./myservice.corevm
+jamt --rpc ws://localhost:19800 vm new ./doom.corevm 1000000000
+```
+
+see [docs/doom.md](docs/doom.md) for running doom on pvm.
 
 ## Structure
 
@@ -65,12 +83,34 @@ examples/
 
 ## PVM
 
-The PolkaVM interpreter supports:
-- 95 instructions
+the polkavm interpreter supports:
+- 95 instructions (jam v1 isa)
 - 32 registers (13 general purpose)
-- 4GB sparse address space (two-level page table)
-- Gas metering
+- 4gb sparse address space (two-level page table)
+- gas metering
 - 27+ host call types
+- optional rust ffi backend for ~70x faster execution
+
+## Building Services
+
+jam services are pvm programs with refine/accumulate entry points:
+
+```bash
+# using polkaports toolchain
+cd ~/rotko/polkaports
+. ./activate.sh polkavm
+
+# compile c to elf
+polkavm-cc -flto -Os service.c -o service.elf
+
+# link to jam format
+polkatool link --dispatch-table '_jb_entry_refine,_jb_entry_accumulate' service.elf -o service.jam
+
+# wrap in corevm format for jamt
+# (add P + SCALE-encoded name/version/license/author header)
+```
+
+see [blc-service](https://github.com/user/blc-service) for a complete sdk.
 
 ## License
 
