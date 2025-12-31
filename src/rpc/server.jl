@@ -686,6 +686,34 @@ function handle_websocket_message(server::RPCServer, data::Vector{UInt8}, client
                         preimage_len = result_tuple[5]
                         server.service_request_subs[sub_id] = (client_id, service_id, preimage_hash, preimage_len)
                         println("Registered service request subscription: sub_id=$(sub_id), service=$(service_id), hash=$(bytes2hex(preimage_hash[1:min(8, length(preimage_hash))]))..., len=$(preimage_len)")
+
+                        # For Bootstrap service (0), store the corevm size and hash so process_bootstrap_work_package!
+                        # can find the matching corevm by size (since jamt's hash includes padding)
+                        # We also store the hash so we can use it as code_hash (jamt expects this exact hash)
+                        # IMPORTANT: jamt sends multiple subscribeServiceRequest calls:
+                        #   1. CoreVM module (~272KB) - the executor that runs guest code
+                        #   2. Guest code (~1-10KB typically) - the actual service being deployed
+                        #   3. Metadata (~81 bytes) - initialization data
+                        # We want the GUEST CODE, which is typically in the 500-50000 byte range.
+                        # Filter out the corevm module (too large) and metadata (too small).
+                        if service_id == UInt32(0)
+                            # Store all sizes in pending_corevm_by_size for lookup
+                            server.chain_state.pending_corevm_by_size[preimage_len] = (collect(preimage_hash), preimage_len)
+
+                            # Only update pending_corevm_size if this looks like guest code (not module, not metadata)
+                            # Guest code is typically 500-50000 bytes, module is >100KB, metadata is <200 bytes
+                            is_likely_guest = preimage_len >= 500 && preimage_len < 100000
+                            current_size = server.chain_state.pending_corevm_size
+
+                            if is_likely_guest && (current_size === nothing || preimage_len < current_size || current_size >= 100000)
+                                # Prefer smaller guest code size over larger (smaller is more specific)
+                                server.chain_state.pending_corevm_size = preimage_len
+                                server.chain_state.pending_corevm_hash = collect(preimage_hash)
+                                println("  Stored pending corevm size for Bootstrap: $(preimage_len) bytes, hash=$(bytes2hex(preimage_hash[1:min(8, length(preimage_hash))]))")
+                            else
+                                println("  Skipping size $(preimage_len) bytes (likely $(preimage_len < 500 ? "metadata" : preimage_len >= 100000 ? "corevm module" : "not preferred"))")
+                            end
+                        end
                     end
                     # Don't send immediate notification - wait for preimage availability
                 elseif notification_type == :service_value_notification
