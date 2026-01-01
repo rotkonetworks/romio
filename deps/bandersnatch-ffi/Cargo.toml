@@ -2,6 +2,12 @@
 name = "bandersnatch-ffi"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "C FFI bindings for Bandersnatch VRF - ring signatures and ticket ID computation"
+repository = "https://github.com/rotkonetworks/romio"
+keywords = ["bandersnatch", "vrf", "ffi", "cryptography", "jam"]
+categories = ["api-bindings", "cryptography"]
+readme = "README.md"
 
 [lib]
 name = "bandersnatch_ffi"

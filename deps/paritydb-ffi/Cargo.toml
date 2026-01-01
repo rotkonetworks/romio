@@ -2,9 +2,15 @@
 name = "paritydb-ffi"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "C FFI bindings for ParityDB - high-performance key-value storage"
+repository = "https://github.com/rotkonetworks/romio"
+keywords = ["paritydb", "database", "ffi", "key-value", "jam"]
+categories = ["api-bindings", "database"]
+readme = "README.md"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 parity-db = "0.5"

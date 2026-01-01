@@ -110,8 +110,6 @@ polkatool link --dispatch-table '_jb_entry_refine,_jb_entry_accumulate' service.
 # (add P + SCALE-encoded name/version/license/author header)
 ```
 
-see [blc-service](https://github.com/user/blc-service) for a complete sdk.
-
 ## License
 
 MIT

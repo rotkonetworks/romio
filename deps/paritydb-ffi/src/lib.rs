@@ -9,7 +9,18 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
 
-/// Error codes
+// ABI version
+pub const PDB_FFI_VERSION_MAJOR: u32 = 0;
+pub const PDB_FFI_VERSION_MINOR: u32 = 1;
+pub const PDB_FFI_VERSION_PATCH: u32 = 0;
+
+/// Get FFI version (major << 16 | minor << 8 | patch)
+#[no_mangle]
+pub extern "C" fn pdb_version() -> u32 {
+    (PDB_FFI_VERSION_MAJOR << 16) | (PDB_FFI_VERSION_MINOR << 8) | PDB_FFI_VERSION_PATCH
+}
+
+// Error codes
 pub const PDB_OK: i32 = 0;
 pub const PDB_NOT_FOUND: i32 = 1;
 pub const PDB_ERR_NULL_PTR: i32 = -1;
