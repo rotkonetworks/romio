@@ -7,8 +7,14 @@ description = "BLC (Binary Lambda Calculus) client for JAM CoreVM services"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "blc"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [features]
 default = ["native"]
+cli = ["clap", "native", "futures-util", "url"]
 native = ["tokio", "tokio-tungstenite"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "web-sys", "js-sys", "gloo-net", "serde-wasm-bindgen"]
 
@@ -18,6 +24,11 @@ serde_json = "1.0"
 hex = "0.4"
 blake2 = "0.10"
 base64 = "0.21"
+
+# cli
+clap = { version = "4.4", features = ["derive"], optional = true }
+futures-util = { version = "0.3", optional = true }
+url = { version = "2.5", optional = true }
 
 # native websocket
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"], optional = true }
