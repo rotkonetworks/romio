@@ -1,0 +1,5 @@
+[build]
+target = "/home/alice/.cache/.polkavm-linker/0.31.0/1_91/riscv64emac-unknown-none-polkavm.json"
+
+[unstable]
+build-std = ["core", "alloc"]

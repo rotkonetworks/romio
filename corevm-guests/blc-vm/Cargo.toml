@@ -1,0 +1,18 @@
+[package]
+name = "blc-vm"
+version = "0.1.0"
+edition = "2021"
+description = "binary lambda calculus evaluator for corevm"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = "fat"
+panic = "abort"
+opt-level = "z"
+codegen-units = 1
+
+[dependencies]
+polkavm-derive = { path = "/home/alice/rotko/polkavm/crates/polkavm-derive" }
