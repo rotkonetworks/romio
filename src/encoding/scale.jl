@@ -46,3 +46,74 @@ function encode_optional(value::Union{Nothing, Vector{UInt8}})::Vector{UInt8}
         return vcat([UInt8(1)], value)
     end
 end
+
+"""
+Encode UInt64 as fixed-width 8-byte little-endian.
+"""
+function encode_u64(x::UInt64)::Vector{UInt8}
+    return [UInt8(x & 0xff), UInt8((x >> 8) & 0xff),
+            UInt8((x >> 16) & 0xff), UInt8((x >> 24) & 0xff),
+            UInt8((x >> 32) & 0xff), UInt8((x >> 40) & 0xff),
+            UInt8((x >> 48) & 0xff), UInt8((x >> 56) & 0xff)]
+end
+
+"""
+Encode UInt32 as fixed-width 4-byte little-endian.
+"""
+function encode_u32(x::UInt32)::Vector{UInt8}
+    return [UInt8(x & 0xff), UInt8((x >> 8) & 0xff),
+            UInt8((x >> 16) & 0xff), UInt8((x >> 24) & 0xff)]
+end
+
+"""
+Encode a JAM ServiceAccount to 89-byte SCALE format.
+Format: code_hash(32) + balance(9: 0xef + 8 bytes) + min_acc_gas(8) + min_memo_gas(8)
+        + storage_octets(8) + storage_items(8) + preimage_octets(8) + preimage_items(8)
+"""
+function encode_service_account(;
+    code_hash::Vector{UInt8},
+    balance::UInt64,
+    min_acc_gas::UInt64 = UInt64(10),
+    min_memo_gas::UInt64 = UInt64(10),
+    storage_octets::UInt64,
+    storage_items::UInt64,
+    preimage_octets::UInt64,
+    preimage_items::UInt64
+)::Vector{UInt8}
+    data = UInt8[]
+
+    # code_hash (32 bytes) - first byte is version 0x00, then 31 bytes of hash
+    push!(data, 0x00)  # version byte
+    if isempty(code_hash)
+        append!(data, zeros(UInt8, 31))
+    else
+        append!(data, code_hash[1:min(31, length(code_hash))])
+        if length(code_hash) < 31
+            append!(data, zeros(UInt8, 31 - length(code_hash)))
+        end
+    end
+
+    # balance (9 bytes: 0xef prefix + 8 bytes LE)
+    push!(data, 0xef)
+    append!(data, encode_u64(balance))
+
+    # min_acc_gas (8 bytes LE)
+    append!(data, encode_u64(min_acc_gas))
+
+    # min_memo_gas (8 bytes LE)
+    append!(data, encode_u64(min_memo_gas))
+
+    # storage_octets (8 bytes LE)
+    append!(data, encode_u64(storage_octets))
+
+    # storage_items (8 bytes LE)
+    append!(data, encode_u64(storage_items))
+
+    # preimage_octets (8 bytes LE)
+    append!(data, encode_u64(preimage_octets))
+
+    # preimage_items (8 bytes LE)
+    append!(data, encode_u64(preimage_items))
+
+    return data
+end

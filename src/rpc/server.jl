@@ -9,7 +9,10 @@ using Base64
 using SHA
 using Dates
 
-export RPCServer, start!, stop!, register_handler!
+# Include JAM protocol constants (JAM_EPOCH, P, E, jam_slot, jam_epoch)
+include(joinpath(dirname(@__DIR__), "constants.jl"))
+
+export RPCServer, start!, stop!, register_handler!, add_block!
 
 # ===== JSON-RPC 2.0 Types =====
 
@@ -133,6 +136,26 @@ function register_block!(
 end
 
 """
+    add_block!(chain_state, header_hash, slot, parent_hash, parent_slot)
+
+Add a block to the chain state for RPC availability queries.
+Works with any ChainState that has a blocks field.
+"""
+function add_block!(
+    chain_state::ChainState,
+    header_hash::Vector{UInt8},
+    slot::UInt64,
+    parent_hash::Vector{UInt8},
+    parent_slot::UInt64
+)
+    chain_state.blocks[header_hash] = Dict{String, Any}(
+        "slot" => slot,
+        "parent_hash" => parent_hash,
+        "parent_slot" => parent_slot
+    )
+end
+
+"""
     update_chain_state!(chain_state, best_hash, best_slot, finalized_hash, finalized_slot)
 
 Update best and finalized block in chain state.
@@ -240,6 +263,7 @@ function register_default_handlers!(server::RPCServer)
     register_handler!(server, "parameters", (s, p) -> rpc_parameters(s, p))
     register_handler!(server, "bestBlock", (s, p) -> rpc_best_block(s, p))
     register_handler!(server, "finalizedBlock", (s, p) -> rpc_finalized_block(s, p))
+    register_handler!(server, "block", (s, p) -> rpc_block(s, p))
     register_handler!(server, "parent", (s, p) -> rpc_parent(s, p))
     register_handler!(server, "stateRoot", (s, p) -> rpc_state_root(s, p))
     register_handler!(server, "beefyRoot", (s, p) -> rpc_beefy_root(s, p))
@@ -251,6 +275,7 @@ function register_default_handlers!(server::RPCServer)
     register_handler!(server, "servicePreimage", (s, p) -> rpc_service_preimage(s, p))
     register_handler!(server, "serviceRequest", (s, p) -> rpc_service_request(s, p))
     register_handler!(server, "listServices", (s, p) -> rpc_list_services(s, p))
+    register_handler!(server, "serviceInfo", (s, p) -> rpc_service_info(s, p))
 
     # Work packages
     register_handler!(server, "workReport", (s, p) -> rpc_work_report(s, p))
@@ -267,6 +292,8 @@ function register_default_handlers!(server::RPCServer)
 
     # Sync state
     register_handler!(server, "syncState", (s, p) -> rpc_sync_state(s, p))
+    register_handler!(server, "state", (s, p) -> rpc_state(s, p))
+    register_handler!(server, "jam_getInfo", (s, p) -> rpc_jam_get_info(s, p))
 
     # Subscriptions
     register_handler!(server, "subscribeBestBlock", (s, p) -> rpc_subscribe_best_block(s, p))
@@ -299,6 +326,42 @@ end
 
 function rpc_finalized_block(server::RPCServer, params::Vector{Any})
     return block_descriptor_to_json(server.chain_state.finalized_block)
+end
+
+function rpc_block(server::RPCServer, params::Vector{Any})
+    length(params) < 1 && throw(RPCError(ERR_INVALID_PARAMS, "Missing header_hash parameter", nothing))
+    header_hash = base64decode(params[1])
+
+    # Check if block exists in chain state
+    if haskey(server.chain_state.blocks, header_hash)
+        block_info = server.chain_state.blocks[header_hash]
+        slot = get(block_info, "slot", 0)
+        # Return block info indicating it's available
+        return Dict{String, Any}(
+            "headerHash" => base64encode(header_hash),
+            "slot" => slot,
+            "available" => true
+        )
+    end
+
+    # Check if it's the genesis/finalized block
+    if header_hash == server.chain_state.finalized_block.header_hash
+        return Dict{String, Any}(
+            "headerHash" => base64encode(header_hash),
+            "slot" => server.chain_state.finalized_block.slot,
+            "available" => true
+        )
+    end
+
+    if header_hash == server.chain_state.best_block.header_hash
+        return Dict{String, Any}(
+            "headerHash" => base64encode(header_hash),
+            "slot" => server.chain_state.best_block.slot,
+            "available" => true
+        )
+    end
+
+    throw(RPCError(ERR_BLOCK_UNAVAILABLE, "Block not found", base64encode(header_hash)))
 end
 
 function rpc_parent(server::RPCServer, params::Vector{Any})
@@ -345,10 +408,22 @@ function rpc_statistics(server::RPCServer, params::Vector{Any})
 end
 
 function rpc_service_data(server::RPCServer, params::Vector{Any})
+    # JIP-2: serviceData returns SCALE-encoded ServiceAccount or null
+    # For now, return null - jamt should handle this gracefully
+    # Full SCALE encoding requires matching polkajam's exact format
     length(params) < 2 && throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters", nothing))
     service_id = UInt32(params[2])
+
+    # Service 0 (bootstrap) is special - return null to indicate no data available
+    # jamt will proceed with submitting work packages
+    if service_id == 0
+        return nothing
+    end
+
     if haskey(server.chain_state.services, service_id)
-        return base64encode(JSON.json(server.chain_state.services[service_id]))
+        # For other services, also return null for now
+        # TODO: Implement proper SCALE encoding matching polkajam format
+        return nothing
     end
     return nothing
 end
@@ -403,6 +478,27 @@ function rpc_list_services(server::RPCServer, params::Vector{Any})
     return collect(keys(server.chain_state.services))
 end
 
+function rpc_service_info(server::RPCServer, params::Vector{Any})
+    length(params) < 1 && throw(RPCError(ERR_INVALID_PARAMS, "Missing service_id", nothing))
+    service_id = UInt32(params[1])
+
+    if !haskey(server.chain_state.services, service_id)
+        return nothing
+    end
+
+    service = server.chain_state.services[service_id]
+
+    return Dict{String, Any}(
+        "service_id" => service_id,
+        "code_hash" => bytes2hex(service.code_hash),
+        "code_size" => length(service.code),
+        "balance" => service.balance,
+        "storage_count" => length(service.storage),
+        "preimage_count" => length(service.preimages),
+        "export_count" => length(service.exports)
+    )
+end
+
 function rpc_work_report(server::RPCServer, params::Vector{Any})
     length(params) < 1 && throw(RPCError(ERR_INVALID_PARAMS, "Missing hash parameter", nothing))
     # TODO: Implement work report lookup
@@ -438,6 +534,34 @@ function rpc_fetch_segments(server::RPCServer, params::Vector{Any})
     length(params) < 2 && throw(RPCError(ERR_INVALID_PARAMS, "Missing parameters", nothing))
     # TODO: Implement DA segment fetching
     throw(RPCError(ERR_DA_SEGMENT_UNAVAILABLE, "Segments not available", nothing))
+end
+
+function rpc_state(server::RPCServer, params::Vector{Any})
+    # Return current chain state info
+    best = server.chain_state.best_block
+    return Dict{String, Any}(
+        "slot" => best.slot,
+        "header_hash" => bytes2hex(best.header_hash),
+        "services" => length(server.chain_state.services)
+    )
+end
+
+function rpc_jam_get_info(server::RPCServer, params::Vector{Any})
+    # Return JAM chain info using proper JAM time from constants
+    best = server.chain_state.best_block
+    current_slot = jam_slot()
+    current_epoch = jam_epoch(current_slot)
+    return Dict{String, Any}(
+        "slot" => current_slot,
+        "timeslot" => current_slot,
+        "epoch" => current_epoch,
+        "bestBlock" => bytes2hex(best.header_hash),
+        "services" => length(server.chain_state.services),
+        "cores" => C,  # from constants.jl
+        "jam_epoch_zero" => JAM_EPOCH,  # Unix timestamp of JAM Common Era
+        "slot_duration" => P,  # 6 seconds
+        "slots_per_epoch" => E  # 600 slots
+    )
 end
 
 function rpc_submit_preimage(server::RPCServer, params::Vector{Any})
@@ -923,7 +1047,10 @@ function handle_http_request(server::RPCServer, client, client_id::UInt64, heade
         return
     end
 
-    response_body = handle_websocket_message(server, body, client_id)
+    response_frames = handle_websocket_message(server, body, client_id)
+
+    # For HTTP, only send the first response (main response, not notifications)
+    response_body = isempty(response_frames) ? UInt8[] : response_frames[1]
 
     response = """HTTP/1.1 200 OK\r
 Content-Type: application/json\r

@@ -4,7 +4,13 @@
 # time
 const P = 6          # slot period in seconds
 const E = 600        # epoch length in timeslots
-const JAM_EPOCH = 1_735_732_800  # 2025-01-01 12:00 UTC
+const JAM_EPOCH = 1_735_732_800  # 2025-01-01 12:00 UTC (JAM Common Era)
+
+# Calculate current JAM slot from wall clock
+jam_slot() = UInt64(div(floor(Int64, time()) - JAM_EPOCH, P))
+
+# Calculate JAM epoch from slot
+jam_epoch(slot::Integer) = div(slot, E)
 
 # network
 const C = 341        # total cores
