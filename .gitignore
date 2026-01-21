@@ -13,8 +13,13 @@ build/romio_sysimage.so
 build/*.so
 
 # Rust build artifacts
-deps/*/target/
-deps/**/Cargo.lock
+**/target/
+**/Cargo.lock
+
+# Build outputs
+*.corevm
+bin/
+*.png
 
 # Generated keys
 jam-keys-*.json
@@ -44,3 +49,4 @@ run_*.jl
 *.polkavm
 *.pvm
 trace_*.txt
+target_path.txt
